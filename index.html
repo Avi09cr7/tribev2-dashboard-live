@@ -1,0 +1,111 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>TRIBE v2 Brain Dashboard</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <header class="topbar">
+        <div>
+          <p class="eyebrow">TRIBE v2</p>
+          <h1>Video Brain Dashboard</h1>
+        </div>
+        <div class="topbar-actions">
+          <label class="file-button">
+            <input id="videoInput" type="file" accept="video/*" />
+            Upload video
+          </label>
+        </div>
+      </header>
+
+      <main class="dashboard-grid">
+        <section class="video-panel" aria-label="Video playback">
+          <div id="dropZone" class="video-frame">
+            <video id="video" playsinline controls preload="metadata"></video>
+            <div id="emptyState" class="empty-state">
+              <strong>Drop a TikTok-style video</strong>
+              <span>MP4, MOV, WebM</span>
+            </div>
+          </div>
+
+          <div class="transport">
+            <button id="playButton" type="button" disabled>Play</button>
+            <button id="resetButton" type="button" disabled>Reset</button>
+            <div class="time-readout">
+              <span id="currentTime">0.0s</span>
+              <span id="duration">0.0s</span>
+            </div>
+          </div>
+        </section>
+
+        <section class="brain-panel" aria-label="Brain activity map">
+          <div class="panel-header">
+            <div>
+              <p class="eyebrow">Current TR</p>
+              <h2 id="activeSecond">Second 0</h2>
+            </div>
+            <span id="modeBadge" class="mode-badge">Demo signal</span>
+          </div>
+          <canvas id="brainCanvas" width="680" height="500"></canvas>
+          <div id="channelMeters" class="channel-meters"></div>
+        </section>
+
+        <section class="timeline-panel" aria-label="Realtime brain activity graphs">
+          <div class="panel-header">
+            <div>
+              <p class="eyebrow">Realtime</p>
+              <h2>Activity by second</h2>
+            </div>
+            <div class="metrics">
+              <span id="videoName">No video</span>
+              <span id="trCount">0 TRs</span>
+            </div>
+          </div>
+          <canvas id="graphCanvas" width="1440" height="440"></canvas>
+          <div id="secondRail" class="second-rail"></div>
+        </section>
+
+        <section class="analysis-panel" aria-label="Creative engagement analysis">
+          <div class="panel-header">
+            <div>
+              <p class="eyebrow">Analysis</p>
+              <h2>Engagement readout</h2>
+            </div>
+            <span id="analysisBadge" class="mode-badge">Waiting for playback</span>
+          </div>
+
+          <div class="analysis-overview">
+            <div class="score-lockup">
+              <span id="engagementScore" class="engagement-score">--</span>
+              <span id="engagementVerdict" class="engagement-verdict">Play the video</span>
+            </div>
+            <p id="engagementSummary">
+              Upload and play a video to generate timestamp-level engagement notes.
+            </p>
+          </div>
+
+          <div class="analysis-columns">
+            <div class="analysis-column">
+              <h3>Timestamp readout</h3>
+              <div id="timestampInsights" class="timestamp-insights"></div>
+            </div>
+            <div class="analysis-column">
+              <h3>Improve engagement</h3>
+              <ul id="improvementList" class="analysis-list"></ul>
+            </div>
+            <div class="analysis-column">
+              <h3>Campaign fit</h3>
+              <ul id="campaignList" class="analysis-list"></ul>
+            </div>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <canvas id="sampleCanvas" class="sample-canvas" width="96" height="54"></canvas>
+    <script src="app.js" defer></script>
+  </body>
+</html>
