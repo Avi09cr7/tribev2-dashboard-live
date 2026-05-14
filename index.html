@@ -44,37 +44,54 @@
         <section class="brain-panel" aria-label="Brain activity map">
           <div class="panel-header">
             <div>
-              <p class="eyebrow">Current TR</p>
+              <p class="eyebrow">Signal console</p>
               <h2 id="activeSecond">Second 0</h2>
+              <p class="panel-note">Live browser-sampled creative signal.</p>
             </div>
-            <span id="modeBadge" class="mode-badge">Demo signal</span>
+            <span id="modeBadge" class="mode-badge" data-tone="ready">Browser demo</span>
           </div>
-          <canvas id="brainCanvas" width="680" height="500"></canvas>
+          <div class="brain-stage">
+            <canvas id="brainCanvas" width="680" height="500"></canvas>
+          </div>
           <div id="channelMeters" class="channel-meters"></div>
         </section>
 
-        <section class="timeline-panel" aria-label="Realtime brain activity graphs">
+        <section id="timelinePanel" class="timeline-panel" aria-label="Realtime brain activity graphs">
           <div class="panel-header">
             <div>
               <p class="eyebrow">Realtime</p>
               <h2>Activity by second</h2>
+              <p class="panel-note">The graph draws as the video plays.</p>
             </div>
             <div class="metrics">
               <span id="videoName">No video</span>
               <span id="trCount">0 TRs</span>
             </div>
           </div>
-          <canvas id="graphCanvas" width="1440" height="440"></canvas>
+          <div class="graph-shell">
+            <canvas id="graphCanvas" width="1440" height="440"></canvas>
+            <div id="graphLoader" class="graph-loader" aria-live="polite">
+              <span class="loader-pixels" aria-hidden="true">
+                <i></i>
+                <i></i>
+                <i></i>
+                <i></i>
+              </span>
+              <strong>Reading video signal</strong>
+              <span>Graph lines appear second by second.</span>
+            </div>
+          </div>
+          <div id="graphLegend" class="graph-legend" aria-label="Graph channel legend"></div>
           <div id="secondRail" class="second-rail"></div>
         </section>
 
-        <section class="analysis-panel" aria-label="Creative engagement analysis">
+        <section id="analysisPanel" class="analysis-panel" aria-label="Creative engagement analysis">
           <div class="panel-header">
             <div>
               <p class="eyebrow">Analysis</p>
               <h2>Engagement readout</h2>
             </div>
-            <span id="analysisBadge" class="mode-badge">Waiting for playback</span>
+            <span id="analysisBadge" class="mode-badge" data-tone="ready">Waiting for playback</span>
           </div>
 
           <div class="analysis-overview">

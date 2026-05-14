@@ -1,11 +1,46 @@
 const channels = [
-  { id: "visual", label: "Visual", color: "#0f8b8d" },
-  { id: "auditory", label: "Auditory", color: "#e4572e" },
-  { id: "language", label: "Language", color: "#456990" },
-  { id: "attention", label: "Attention", color: "#f2a541" },
-  { id: "motor", label: "Motor", color: "#2e7d32" },
-  { id: "salience", label: "Salience", color: "#b23a48" },
-  { id: "default", label: "Default", color: "#7d5ba6" },
+  {
+    id: "visual",
+    label: "Visual",
+    color: "#008f7a",
+    info: "How much the image changes and pulls the eye. High values usually mean stronger visual attention.",
+  },
+  {
+    id: "auditory",
+    label: "Auditory",
+    color: "#ff7759",
+    info: "How much sound, beat, voice, or music energy is present in the moment.",
+  },
+  {
+    id: "language",
+    label: "Language",
+    color: "#1863dc",
+    info: "A rough signal for speech or message-heavy moments. It is not a transcript.",
+  },
+  {
+    id: "attention",
+    label: "Attention",
+    color: "#f2a541",
+    info: "A combined signal for motion, contrast, novelty, and pace. Higher usually means the moment is easier to notice.",
+  },
+  {
+    id: "motor",
+    label: "Motor",
+    color: "#4a8f3a",
+    info: "Movement energy from cuts, camera motion, people moving, or product movement.",
+  },
+  {
+    id: "salience",
+    label: "Salience",
+    color: "#b23a48",
+    info: "Moments that stand out because something changes sharply in color, motion, or sound.",
+  },
+  {
+    id: "default",
+    label: "Default",
+    color: "#7d5ba6",
+    info: "Quieter stretches with less stimulation. If this stays high, viewers may drift unless the story is very clear.",
+  },
 ];
 
 const els = {
@@ -23,10 +58,14 @@ const els = {
   trCount: document.getElementById("trCount"),
   brainCanvas: document.getElementById("brainCanvas"),
   graphCanvas: document.getElementById("graphCanvas"),
+  timelinePanel: document.getElementById("timelinePanel"),
+  graphLoader: document.getElementById("graphLoader"),
+  graphLegend: document.getElementById("graphLegend"),
   sampleCanvas: document.getElementById("sampleCanvas"),
   secondRail: document.getElementById("secondRail"),
   channelMeters: document.getElementById("channelMeters"),
   analysisBadge: document.getElementById("analysisBadge"),
+  analysisPanel: document.getElementById("analysisPanel"),
   engagementScore: document.getElementById("engagementScore"),
   engagementVerdict: document.getElementById("engagementVerdict"),
   engagementSummary: document.getElementById("engagementSummary"),
@@ -51,7 +90,10 @@ const state = {
   audioData: null,
   mediaSource: null,
   lastFrameAt: 0,
+  lastCanvasDrawAt: 0,
   lastAnalysisAt: 0,
+  needsRedraw: true,
+  hasAutoScrolled: false,
   samplingErrorShown: false,
 };
 
@@ -72,6 +114,14 @@ function clamp(value, min = 0, max = 1) {
 
 function mix(previous, next, amount) {
   return previous * (1 - amount) + next * amount;
+}
+
+function niceTick(value) {
+  if (value <= 1) return 1;
+  if (value <= 2) return 2;
+  if (value <= 5) return 5;
+  if (value <= 10) return 10;
+  return Math.ceil(value / 10) * 10;
 }
 
 function formatTime(seconds) {
@@ -95,6 +145,19 @@ function activeSeries() {
   return state.liveSeries;
 }
 
+function setBadge(element, text, tone = "ready") {
+  element.textContent = text;
+  element.dataset.tone = tone;
+}
+
+function scrollToTimeline() {
+  const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  els.timelinePanel.scrollIntoView({
+    behavior: reduceMotion ? "auto" : "smooth",
+    block: "start",
+  });
+}
+
 function initMeters() {
   els.channelMeters.innerHTML = "";
   for (const channel of channels) {
@@ -106,15 +169,32 @@ function initMeters() {
         <span class="meter-label">
           <span class="swatch" style="background:${channel.color}"></span>
           <span>${channel.label}</span>
+          <button class="info-button" type="button" aria-expanded="false" aria-controls="info-${channel.id}" data-info="${channel.id}">?</button>
         </span>
         <span class="meter-value">0.00</span>
       </div>
       <div class="meter-track">
         <span class="meter-fill" style="background:${channel.color}"></span>
       </div>
+      <p id="info-${channel.id}" class="info-popover" hidden>${channel.info}</p>
     `;
     els.channelMeters.appendChild(meter);
   }
+}
+
+function initGraphLegend() {
+  els.graphLegend.innerHTML = "";
+  const fragment = document.createDocumentFragment();
+  for (const channel of channels) {
+    const chip = document.createElement("span");
+    chip.className = "legend-chip";
+    chip.innerHTML = `
+      <span class="swatch" style="background:${channel.color}"></span>
+      <span>${channel.label}</span>
+    `;
+    fragment.append(chip);
+  }
+  els.graphLegend.append(fragment);
 }
 
 function updateMeters(values) {
@@ -135,6 +215,7 @@ function resetAnalysis(seconds) {
   state.counts = Array(state.seconds).fill(0);
   state.previousPixels = null;
   state.currentValues = Object.fromEntries(channels.map((channel) => [channel.id, 0]));
+  state.needsRedraw = true;
   buildSecondRail();
   updateStatus();
   renderAnalysis(true);
@@ -174,15 +255,14 @@ async function loadVideoFile(file) {
   state.mode = "demo";
   state.previousPixels = null;
   state.samplingErrorShown = false;
+  state.hasAutoScrolled = false;
   els.dropZone.classList.remove("is-portrait");
   els.video.src = state.videoUrl;
   els.video.load();
   resetAnalysis(0);
   els.emptyState.classList.add("is-hidden");
   els.videoName.textContent = file.name;
-  els.modeBadge.textContent = "Demo signal";
-  els.modeBadge.style.color = "#0d585a";
-  els.modeBadge.style.background = "rgba(15, 139, 141, 0.12)";
+  setBadge(els.modeBadge, "Ready to read", "ready");
   els.playButton.disabled = false;
   els.resetButton.disabled = false;
   els.videoInput.value = "";
@@ -345,18 +425,26 @@ function updateVideoFrameAspect() {
   els.dropZone.classList.toggle("is-portrait", height > width * 1.08);
 }
 
+function setTimelineLoading(isLoading) {
+  els.timelinePanel.classList.toggle("is-loading", isLoading);
+}
+
 function renderAnalysis(force = false) {
   const now = performance.now();
   if (!force && now - state.lastAnalysisAt < 650) return;
   state.lastAnalysisAt = now;
 
   const rows = getObservedRows();
+  const isReadingFirstSeconds = !els.video.paused && rows.length < Math.min(2, state.seconds);
+  setTimelineLoading(isReadingFirstSeconds);
+  els.analysisPanel.classList.toggle("is-loading", isReadingFirstSeconds);
   if (rows.length === 0) {
-    els.analysisBadge.textContent = "Waiting for playback";
+    const isReading = Boolean(els.video.src) && !els.video.paused;
+    setBadge(els.analysisBadge, isReading ? "Reading first seconds" : "Waiting for playback", isReading ? "active" : "ready");
     els.engagementScore.textContent = "--";
-    els.engagementVerdict.textContent = "Play the video";
+    els.engagementVerdict.textContent = isReading ? "Reading signal" : "Play the video";
     els.engagementSummary.textContent =
-      "Upload and play a video to generate timestamp-level engagement notes.";
+      "Play a video to see simple notes about where attention rises, where it drops, and what to improve.";
     renderTimestampItems([
       {
         start: 0,
@@ -373,7 +461,7 @@ function renderAnalysis(force = false) {
   const score = average(rows.map((row) => row.engagement));
   const verdict = engagementVerdict(score);
   const observedLabel = `${rows.length}/${state.seconds} seconds read`;
-  els.analysisBadge.textContent = observedLabel;
+  setBadge(els.analysisBadge, observedLabel, els.video.paused ? "ready" : "active");
   els.engagementScore.textContent = String(Math.round(score * 100));
   els.engagementVerdict.textContent = verdict.label;
   els.engagementSummary.textContent = buildEngagementSummary(rows, score, verdict);
@@ -414,10 +502,10 @@ function getObservedRows() {
 }
 
 function engagementVerdict(score) {
-  if (score >= 0.74) return { label: "Strong audience pull", tone: "strong" };
-  if (score >= 0.58) return { label: "Promising with edits", tone: "promising" };
-  if (score >= 0.42) return { label: "Needs a sharper hook", tone: "soft" };
-  return { label: "Low retention risk", tone: "low" };
+  if (score >= 0.74) return { label: "Strong watch potential", tone: "strong" };
+  if (score >= 0.58) return { label: "Good, with room to sharpen", tone: "promising" };
+  if (score >= 0.42) return { label: "Needs a stronger hook", tone: "soft" };
+  return { label: "Likely to lose viewers", tone: "low" };
 }
 
 function buildEngagementSummary(rows, score, verdict) {
@@ -426,9 +514,9 @@ function buildEngagementSummary(rows, score, verdict) {
   const peak = maxBy(rows, (row) => row.engagement);
   const audio = average(rows.map((row) => row.audioSignal));
   const motion = average(rows.map((row) => row.motionSignal));
-  const opening = firstScore >= 0.58 ? "The opening is carrying enough signal to earn a first watch." : "The opening could work harder in the first 2-3 seconds.";
-  const driver = motion > audio ? "Movement and visual change are the main engagement drivers." : "Audio, voice, or rhythm appears to be doing more of the work.";
-  return `${verdict.label}. ${opening} ${driver} The strongest observed moment is around ${formatTimestamp(peak.second)}, where ${peak.dominant.label.toLowerCase()} and attention signals are highest.`;
+  const opening = firstScore >= 0.58 ? "The first few seconds are doing enough to keep people watching." : "The first few seconds need a clearer reason to keep watching.";
+  const driver = motion > audio ? "The video is mainly helped by visual movement." : "The video is mainly helped by sound, voice, or rhythm.";
+  return `${verdict.label}. ${opening} ${driver} The strongest moment appears around ${formatTimestamp(peak.second)}.`;
 }
 
 function buildTimestampSegments(rows) {
@@ -461,42 +549,42 @@ function classifyMoment(row) {
   if (engagement >= 0.72 && motionSignal >= 0.35) {
     return {
       key: "peak-motion",
-      title: "Peak hook: motion and salience align",
-      body: "A faster visual beat is likely to hold attention here. This is a good place for the core product or payoff.",
+      title: "Strong attention moment",
+      body: "This section has movement and contrast. Put the product, offer, or payoff close to moments like this.",
     };
   }
   if (audioSignal >= 0.5 && values.language >= 0.36) {
     return {
       key: "audio-message",
-      title: "Audio-led message beat",
-      body: "The signal is being carried by sound, speech, or rhythm. Captions and clear offer text would reinforce this moment.",
+      title: "Sound-led moment",
+      body: "Sound or voice is doing the work here. Add captions so the message still lands when sound is off.",
     };
   }
   if (values.attention >= 0.52 && values.visual >= 0.38) {
     return {
       key: "visual-lift",
-      title: "Visual attention lift",
-      body: "The frame has enough change and contrast to pull focus. Keep the viewer oriented with a clear subject or benefit.",
+      title: "Good visual lift",
+      body: "The frame is changing enough to pull focus. Make sure the viewer can quickly understand what they are seeing.",
     };
   }
   if (values.salience >= 0.42) {
     return {
       key: "salience-spike",
-      title: "Salience spike",
-      body: "This reads as a noticeable beat. It can support a reveal, price cue, before-after moment, or call to action.",
+      title: "Standout beat",
+      body: "This part stands out. It can support a reveal, before-after moment, price cue, or call to action.",
     };
   }
   if (values.default >= 0.58 && engagement < 0.48) {
     return {
       key: "low-change",
-      title: "Low-change stretch",
-      body: "The signal relaxes here. Trim, add a pattern interrupt, or place copy that explains why the viewer should stay.",
+      title: "Slow stretch",
+      body: "This part may feel flat. Trim it, add a visual change, or add text that gives people a reason to stay.",
     };
   }
   return {
     key: "steady",
-    title: "Steady engagement beat",
-    body: `The ${row.dominant.label.toLowerCase()} signal leads here, with moderate retention potential.`,
+    title: "Steady moment",
+    body: `This section is stable. The ${row.dominant.label.toLowerCase()} signal is strongest here.`,
   };
 }
 
@@ -511,22 +599,22 @@ function buildImprovements(rows, score) {
   const items = [];
 
   if (firstScore < 0.58) {
-    items.push("Move the strongest visual or audio payoff into the first 2 seconds.");
+    items.push("Show the most interesting visual, line, or result in the first 2 seconds.");
   }
   if (motion < 0.28 && attention < 0.5) {
-    items.push("Add a clear pattern interrupt: tighter cut, camera move, product reveal, or before-after shift.");
+    items.push("Add one clear change: a tighter cut, camera move, product reveal, or before-after switch.");
   }
   if (audio < 0.32) {
-    items.push("Use a stronger beat, voiceover, or caption-led hook so silent and sound-on viewers both understand the promise.");
+    items.push("Add stronger sound or captions so the promise is clear with sound on or off.");
   }
   if (defaultMode > 0.55 || salience < 0.32) {
-    items.push("Trim low-change stretches and put the offer, transformation, or tension closer to the attention peaks.");
+    items.push("Trim slow parts and move the offer or transformation closer to the strongest moments.");
   }
   if (score >= 0.68) {
-    items.push("Keep the current pacing, then test two hook variants rather than rebuilding the whole creative.");
+    items.push("Keep the core edit, then test two different opening hooks.");
   }
   if (items.length === 0) {
-    items.push("Strengthen the hook, keep the clearest proof point, and test a more direct call to action.");
+    items.push("Make the hook clearer, keep the strongest proof point, and end with a direct next step.");
   }
   return items.slice(0, 4);
 }
@@ -540,18 +628,18 @@ function buildCampaignFits(rows, score) {
   const fits = [];
 
   if (visual > 0.38 && motion > 0.28) {
-    fits.push("Awareness or top-of-funnel creative where fast visual proof matters.");
+    fits.push("Awareness ads where fast visual proof matters.");
   }
   if (audio > 0.38 || language > 0.34) {
-    fits.push("Creator testimonial, explainer, or offer-led campaign with captions.");
+    fits.push("Creator testimonial or explainer with strong captions.");
   }
   if (salience > 0.38) {
-    fits.push("Launch, drop, limited-time offer, or before-after story.");
+    fits.push("Launch, product drop, limited-time offer, or before-after story.");
   }
   if (score < 0.5) {
-    fits.push("Retargeting only after tightening the hook and cutting low-signal seconds.");
+    fits.push("Use for retargeting only after the opening is tighter.");
   } else {
-    fits.push("A/B test as paid social with separate hook, CTA, and caption variants.");
+    fits.push("A/B test as paid social with different hooks, captions, and calls to action.");
   }
   return fits.slice(0, 4);
 }
@@ -611,11 +699,18 @@ function drawBrain(values) {
   const height = canvas.height;
   ctx.clearRect(0, 0, width, height);
 
-  const background = ctx.createLinearGradient(0, 0, width, height);
-  background.addColorStop(0, "#fbfcfb");
-  background.addColorStop(1, "#edf2f0");
-  ctx.fillStyle = background;
+  ctx.fillStyle = "#071829";
   ctx.fillRect(0, 0, width, height);
+  ctx.save();
+  ctx.globalAlpha = 0.18;
+  ctx.fillStyle = "#edfce9";
+  const grid = Math.max(12, Math.floor(width / 34));
+  for (let x = grid; x < width; x += grid) {
+    for (let y = grid; y < height; y += grid) {
+      ctx.fillRect(x, y, 2, 2);
+    }
+  }
+  ctx.restore();
 
   drawHemisphere(ctx, width * 0.36, height * 0.5, width * 0.34, height * 0.72, -1);
   drawHemisphere(ctx, width * 0.64, height * 0.5, width * 0.34, height * 0.72, 1);
@@ -643,8 +738,8 @@ function drawBrain(values) {
   }
 
   ctx.save();
-  ctx.globalAlpha = 0.42;
-  ctx.strokeStyle = "#384047";
+  ctx.globalAlpha = 0.46;
+  ctx.strokeStyle = "rgba(237, 252, 233, 0.72)";
   ctx.lineWidth = 1.2;
   drawSulci(ctx, width, height);
   ctx.restore();
@@ -662,16 +757,16 @@ function drawHemisphere(ctx, cx, cy, w, h, side) {
   ctx.bezierCurveTo(w * 0.57, -h * 0.3, w * 0.28, -h * 0.52, -w * 0.08, -h * 0.47);
   ctx.closePath();
   const gradient = ctx.createLinearGradient(-w * 0.55, -h * 0.5, w * 0.55, h * 0.5);
-  gradient.addColorStop(0, "#dfe6e2");
-  gradient.addColorStop(0.48, "#f7f8f7");
-  gradient.addColorStop(1, "#cbd5d1");
+  gradient.addColorStop(0, "rgba(0, 60, 51, 0.9)");
+  gradient.addColorStop(0.48, "rgba(7, 24, 41, 0.94)");
+  gradient.addColorStop(1, "rgba(0, 143, 122, 0.56)");
   ctx.fillStyle = gradient;
-  ctx.shadowColor = "rgba(23, 25, 28, 0.16)";
-  ctx.shadowBlur = 18;
-  ctx.shadowOffsetY = 10;
+  ctx.shadowColor = "rgba(0, 0, 0, 0.38)";
+  ctx.shadowBlur = 24;
+  ctx.shadowOffsetY = 12;
   ctx.fill();
   ctx.shadowColor = "transparent";
-  ctx.strokeStyle = "#96a19e";
+  ctx.strokeStyle = "rgba(237, 252, 233, 0.46)";
   ctx.lineWidth = 2;
   ctx.stroke();
   ctx.restore();
@@ -679,7 +774,7 @@ function drawHemisphere(ctx, cx, cy, w, h, side) {
 
 function drawMidline(ctx, width, height) {
   ctx.save();
-  ctx.strokeStyle = "#c2cbc7";
+  ctx.strokeStyle = "rgba(237, 252, 233, 0.35)";
   ctx.lineWidth = 2;
   ctx.setLineDash([7, 8]);
   ctx.beginPath();
@@ -715,10 +810,10 @@ function drawSulci(ctx, width, height) {
 
 function drawBlob(ctx, x, y, radius, color, value) {
   ctx.save();
-  ctx.globalCompositeOperation = "multiply";
+  ctx.globalCompositeOperation = "screen";
   const gradient = ctx.createRadialGradient(x, y, 0, x, y, radius);
-  gradient.addColorStop(0, colorWithAlpha(color, 0.72 * value));
-  gradient.addColorStop(0.42, colorWithAlpha(color, 0.32 * value));
+  gradient.addColorStop(0, colorWithAlpha(color, 0.9 * value));
+  gradient.addColorStop(0.42, colorWithAlpha(color, 0.45 * value));
   gradient.addColorStop(1, colorWithAlpha(color, 0));
   ctx.fillStyle = gradient;
   ctx.beginPath();
@@ -740,7 +835,13 @@ function drawGraph() {
   const ctx = graphCtx;
   const width = canvas.width;
   const height = canvas.height;
-  const padding = { left: 54, right: 22, top: 24, bottom: 42 };
+  const ratio = window.devicePixelRatio || 1;
+  const padding = {
+    left: 48 * ratio,
+    right: 18 * ratio,
+    top: 24 * ratio,
+    bottom: 34 * ratio,
+  };
   const plotWidth = width - padding.left - padding.right;
   const plotHeight = height - padding.top - padding.bottom;
   const series = activeSeries();
@@ -748,13 +849,13 @@ function drawGraph() {
   const current = els.video.currentTime || 0;
 
   ctx.clearRect(0, 0, width, height);
-  ctx.fillStyle = "#fbfcfb";
+  ctx.fillStyle = "#fffdfa";
   ctx.fillRect(0, 0, width, height);
 
-  ctx.strokeStyle = "#dfe6e2";
+  ctx.strokeStyle = "rgba(0, 60, 51, 0.13)";
   ctx.lineWidth = 1;
-  ctx.font = "24px Inter, system-ui, sans-serif";
-  ctx.fillStyle = "#6d767f";
+  ctx.font = `${12 * ratio}px Inter, system-ui, sans-serif`;
+  ctx.fillStyle = "#616161";
   ctx.textAlign = "right";
   ctx.textBaseline = "middle";
 
@@ -768,12 +869,13 @@ function drawGraph() {
     ctx.fillText(label, padding.left - 10, y);
   }
 
-  const tickEvery = seconds <= 20 ? 1 : seconds <= 80 ? 5 : 10;
+  const maxTicks = Math.max(2, Math.floor(plotWidth / (92 * ratio)));
+  const tickEvery = niceTick(Math.ceil(seconds / maxTicks));
   ctx.textAlign = "center";
   ctx.textBaseline = "top";
   for (let second = 0; second <= seconds; second += tickEvery) {
     const x = padding.left + (second / seconds) * plotWidth;
-    ctx.strokeStyle = second % (tickEvery * 2) === 0 ? "#cbd5d1" : "#e9eeeb";
+    ctx.strokeStyle = second % (tickEvery * 2) === 0 ? "rgba(0, 60, 51, 0.18)" : "rgba(0, 60, 51, 0.08)";
     ctx.beginPath();
     ctx.moveTo(x, padding.top);
     ctx.lineTo(x, padding.top + plotHeight);
@@ -785,7 +887,7 @@ function drawGraph() {
   for (const channel of channels) {
     const values = series[channel.id] || [];
     ctx.strokeStyle = channel.color;
-    ctx.lineWidth = 4;
+    ctx.lineWidth = 2.5 * ratio;
     ctx.lineJoin = "round";
     ctx.lineCap = "round";
     ctx.beginPath();
@@ -810,26 +912,17 @@ function drawGraph() {
 
   const cursorX = padding.left + (clamp(current / Math.max(state.duration, 1)) * plotWidth);
   ctx.save();
-  ctx.strokeStyle = "#17191c";
-  ctx.lineWidth = 2;
+  ctx.strokeStyle = "#17171c";
+  ctx.lineWidth = 1.5 * ratio;
   ctx.beginPath();
   ctx.moveTo(cursorX, padding.top - 4);
   ctx.lineTo(cursorX, padding.top + plotHeight + 4);
   ctx.stroke();
+  ctx.fillStyle = "#ff7759";
+  ctx.beginPath();
+  ctx.arc(cursorX, padding.top + 8 * ratio, 4 * ratio, 0, Math.PI * 2);
+  ctx.fill();
   ctx.restore();
-
-  ctx.textAlign = "left";
-  ctx.textBaseline = "alphabetic";
-  ctx.font = "22px Inter, system-ui, sans-serif";
-  let legendX = padding.left;
-  const legendY = height - 12;
-  for (const channel of channels) {
-    ctx.fillStyle = channel.color;
-    ctx.fillRect(legendX, legendY - 15, 16, 8);
-    ctx.fillStyle = "#30363c";
-    ctx.fillText(channel.label, legendX + 24, legendY - 5);
-    legendX += ctx.measureText(channel.label).width + 66;
-  }
 }
 
 function resizeCanvasToDisplaySize(canvas) {
@@ -844,24 +937,29 @@ function resizeCanvasToDisplaySize(canvas) {
 }
 
 function draw() {
-  resizeCanvasToDisplaySize(els.brainCanvas);
-  resizeCanvasToDisplaySize(els.graphCanvas);
-
+  const now = performance.now();
   if (!els.video.paused) {
-    const now = performance.now();
     if (now - state.lastFrameAt > 85) {
       state.lastFrameAt = now;
       absorbLiveValues(safelySampleVideoFeatures());
+      state.needsRedraw = true;
     }
   }
 
-  updateCurrentValuesFromSeries();
-  updateMeters(state.currentValues);
-  drawBrain(state.currentValues);
-  drawGraph();
-  updateStatus();
-  updateSecondRail();
-  renderAnalysis();
+  const redrawEvery = els.video.paused ? 180 : 50;
+  if (state.needsRedraw || now - state.lastCanvasDrawAt > redrawEvery) {
+    state.lastCanvasDrawAt = now;
+    state.needsRedraw = false;
+    resizeCanvasToDisplaySize(els.brainCanvas);
+    resizeCanvasToDisplaySize(els.graphCanvas);
+    updateCurrentValuesFromSeries();
+    updateMeters(state.currentValues);
+    drawBrain(state.currentValues);
+    drawGraph();
+    updateStatus();
+    updateSecondRail();
+    renderAnalysis();
+  }
   requestAnimationFrame(draw);
 }
 
@@ -877,14 +975,16 @@ els.playButton.addEventListener("click", async () => {
         await state.audioContext.resume();
       }
       await els.video.play();
+      if (!state.hasAutoScrolled) {
+        state.hasAutoScrolled = true;
+        requestAnimationFrame(scrollToTimeline);
+      }
     } else {
       els.video.pause();
     }
   } catch (error) {
     console.error("Video playback failed", error);
-    els.modeBadge.textContent = "Playback error";
-    els.modeBadge.style.color = "#8d1f1f";
-    els.modeBadge.style.background = "rgba(178, 58, 72, 0.16)";
+    setBadge(els.modeBadge, "Playback error", "error");
   }
 });
 
@@ -904,22 +1004,29 @@ els.video.addEventListener("loadedmetadata", () => {
 
 els.video.addEventListener("play", () => {
   els.playButton.textContent = "Pause";
+  setBadge(els.modeBadge, "Reading signal", "active");
   setupAudioAnalyser();
 });
 
 els.video.addEventListener("pause", () => {
   els.playButton.textContent = "Play";
+  if (!els.video.ended && els.video.src) {
+    setBadge(els.modeBadge, "Paused", "ready");
+  }
 });
 
 els.video.addEventListener("ended", () => {
   els.playButton.textContent = "Play";
+  setBadge(els.modeBadge, "Read complete", "ready");
+  setTimelineLoading(false);
+  els.analysisPanel.classList.remove("is-loading");
 });
 
 els.video.addEventListener("error", () => {
   console.error("Video element error", els.video.error);
-  els.modeBadge.textContent = "Video error";
-  els.modeBadge.style.color = "#8d1f1f";
-  els.modeBadge.style.background = "rgba(178, 58, 72, 0.16)";
+  setBadge(els.modeBadge, "Video error", "error");
+  setTimelineLoading(false);
+  els.analysisPanel.classList.remove("is-loading");
 });
 
 ["dragenter", "dragover"].forEach((eventName) => {
@@ -941,11 +1048,28 @@ els.dropZone.addEventListener("drop", (event) => {
   loadVideoFile(file);
 });
 
+els.channelMeters.addEventListener("click", (event) => {
+  const button = event.target.closest(".info-button");
+  if (!button) return;
+  const meter = button.closest(".meter");
+  const popover = meter.querySelector(".info-popover");
+  const shouldOpen = !meter.classList.contains("is-info-open");
+  for (const openMeter of els.channelMeters.querySelectorAll(".meter.is-info-open")) {
+    openMeter.classList.remove("is-info-open");
+    openMeter.querySelector(".info-button")?.setAttribute("aria-expanded", "false");
+    const openPopover = openMeter.querySelector(".info-popover");
+    if (openPopover) openPopover.hidden = true;
+  }
+  meter.classList.toggle("is-info-open", shouldOpen);
+  button.setAttribute("aria-expanded", String(shouldOpen));
+  popover.hidden = !shouldOpen;
+});
+
 window.addEventListener("resize", () => {
-  drawBrain(state.currentValues);
-  drawGraph();
+  state.needsRedraw = true;
 });
 
 initMeters();
+initGraphLegend();
 resetAnalysis(0);
 draw();
