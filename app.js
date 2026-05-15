@@ -699,22 +699,27 @@ function drawBrain(values) {
   const height = canvas.height;
   ctx.clearRect(0, 0, width, height);
 
-  ctx.fillStyle = "#071829";
+  const background = ctx.createRadialGradient(width * 0.5, height * 0.42, 0, width * 0.5, height * 0.5, width * 0.72);
+  background.addColorStop(0, "#102639");
+  background.addColorStop(0.55, "#08111b");
+  background.addColorStop(1, "#03070b");
+  ctx.fillStyle = background;
   ctx.fillRect(0, 0, width, height);
+
   ctx.save();
-  ctx.globalAlpha = 0.18;
-  ctx.fillStyle = "#edfce9";
-  const grid = Math.max(12, Math.floor(width / 34));
+  ctx.globalAlpha = 0.22;
+  ctx.fillStyle = "#26d6b3";
+  const grid = Math.max(10, Math.floor(width / 44));
   for (let x = grid; x < width; x += grid) {
     for (let y = grid; y < height; y += grid) {
-      ctx.fillRect(x, y, 2, 2);
+      if ((x / grid + y / grid) % 2 === 0) ctx.fillRect(x, y, 2, 2);
     }
   }
   ctx.restore();
 
+  drawBrainBaseShadow(ctx, width, height);
   drawHemisphere(ctx, width * 0.36, height * 0.5, width * 0.34, height * 0.72, -1);
   drawHemisphere(ctx, width * 0.64, height * 0.5, width * 0.34, height * 0.72, 1);
-  drawMidline(ctx, width, height);
 
   const spots = [
     ["visual", 0.27, 0.62, 0.18],
@@ -730,18 +735,28 @@ function drawBrain(values) {
     ["default", 0.49, 0.66, 0.18],
   ];
 
+  drawActivationNetwork(ctx, width, height, spots, values);
   for (const [id, x, y, radius] of spots) {
     const channel = channels.find((item) => item.id === id);
     const value = clamp(values[id]);
     if (value <= 0.01) continue;
-    drawBlob(ctx, x * width, y * height, radius * width * (0.72 + value * 0.62), channel.color, value);
+    drawBlob(ctx, x * width, y * height, radius * width * (0.45 + value * 0.5), channel.color, value);
   }
 
+  drawMidline(ctx, width, height);
+  drawNeuralNodes(ctx, width, height, spots, values);
+}
+
+function drawBrainBaseShadow(ctx, width, height) {
   ctx.save();
-  ctx.globalAlpha = 0.46;
-  ctx.strokeStyle = "rgba(237, 252, 233, 0.72)";
-  ctx.lineWidth = 1.2;
-  drawSulci(ctx, width, height);
+  const shadow = ctx.createRadialGradient(width * 0.5, height * 0.56, 0, width * 0.5, height * 0.6, width * 0.42);
+  shadow.addColorStop(0, "rgba(38, 214, 179, 0.18)");
+  shadow.addColorStop(0.65, "rgba(0, 0, 0, 0.26)");
+  shadow.addColorStop(1, "rgba(0, 0, 0, 0)");
+  ctx.fillStyle = shadow;
+  ctx.beginPath();
+  ctx.ellipse(width * 0.5, height * 0.62, width * 0.34, height * 0.18, 0, 0, Math.PI * 2);
+  ctx.fill();
   ctx.restore();
 }
 
@@ -749,76 +764,170 @@ function drawHemisphere(ctx, cx, cy, w, h, side) {
   ctx.save();
   ctx.translate(cx, cy);
   ctx.scale(side, 1);
-  ctx.beginPath();
-  ctx.moveTo(-w * 0.08, -h * 0.47);
-  ctx.bezierCurveTo(-w * 0.44, -h * 0.45, -w * 0.58, -h * 0.22, -w * 0.55, h * 0.05);
-  ctx.bezierCurveTo(-w * 0.63, h * 0.22, -w * 0.39, h * 0.48, -w * 0.06, h * 0.5);
-  ctx.bezierCurveTo(w * 0.36, h * 0.52, w * 0.56, h * 0.25, w * 0.5, -h * 0.04);
-  ctx.bezierCurveTo(w * 0.57, -h * 0.3, w * 0.28, -h * 0.52, -w * 0.08, -h * 0.47);
-  ctx.closePath();
-  const gradient = ctx.createLinearGradient(-w * 0.55, -h * 0.5, w * 0.55, h * 0.5);
-  gradient.addColorStop(0, "rgba(0, 60, 51, 0.9)");
-  gradient.addColorStop(0.48, "rgba(7, 24, 41, 0.94)");
-  gradient.addColorStop(1, "rgba(0, 143, 122, 0.56)");
+  drawHemisphereShape(ctx, w, h);
+
+  const gradient = ctx.createLinearGradient(-w * 0.6, -h * 0.56, w * 0.6, h * 0.54);
+  gradient.addColorStop(0, "rgba(19, 61, 69, 0.98)");
+  gradient.addColorStop(0.34, "rgba(8, 23, 35, 0.98)");
+  gradient.addColorStop(0.72, "rgba(4, 15, 24, 0.98)");
+  gradient.addColorStop(1, "rgba(33, 101, 91, 0.86)");
   ctx.fillStyle = gradient;
-  ctx.shadowColor = "rgba(0, 0, 0, 0.38)";
-  ctx.shadowBlur = 24;
-  ctx.shadowOffsetY = 12;
+  ctx.shadowColor = "rgba(0, 0, 0, 0.5)";
+  ctx.shadowBlur = 28;
+  ctx.shadowOffsetY = 15;
   ctx.fill();
+
   ctx.shadowColor = "transparent";
-  ctx.strokeStyle = "rgba(237, 252, 233, 0.46)";
+  ctx.strokeStyle = "rgba(237, 252, 233, 0.44)";
   ctx.lineWidth = 2;
   ctx.stroke();
+
+  ctx.save();
+  drawHemisphereShape(ctx, w, h);
+  ctx.clip();
+  drawHemisphereDepth(ctx, w, h);
+  drawCorticalFolds(ctx, w, h);
   ctx.restore();
+
+  ctx.restore();
+}
+
+function drawHemisphereShape(ctx, w, h) {
+  ctx.beginPath();
+  ctx.moveTo(-w * 0.03, -h * 0.49);
+  ctx.bezierCurveTo(-w * 0.38, -h * 0.54, -w * 0.65, -h * 0.34, -w * 0.66, -h * 0.08);
+  ctx.bezierCurveTo(-w * 0.76, h * 0.09, -w * 0.66, h * 0.32, -w * 0.44, h * 0.43);
+  ctx.bezierCurveTo(-w * 0.31, h * 0.55, -w * 0.05, h * 0.57, w * 0.12, h * 0.5);
+  ctx.bezierCurveTo(w * 0.42, h * 0.47, w * 0.6, h * 0.22, w * 0.55, -h * 0.05);
+  ctx.bezierCurveTo(w * 0.6, -h * 0.3, w * 0.35, -h * 0.49, -w * 0.03, -h * 0.49);
+  ctx.closePath();
+}
+
+function drawHemisphereDepth(ctx, w, h) {
+  const highlight = ctx.createRadialGradient(-w * 0.26, -h * 0.34, 0, -w * 0.18, -h * 0.2, w * 0.78);
+  highlight.addColorStop(0, "rgba(245, 242, 234, 0.17)");
+  highlight.addColorStop(0.45, "rgba(38, 214, 179, 0.08)");
+  highlight.addColorStop(1, "rgba(0, 0, 0, 0)");
+  ctx.fillStyle = highlight;
+  ctx.fillRect(-w, -h, w * 2, h * 2);
+
+  const lowerShade = ctx.createLinearGradient(0, -h * 0.1, 0, h * 0.56);
+  lowerShade.addColorStop(0, "rgba(0, 0, 0, 0)");
+  lowerShade.addColorStop(1, "rgba(0, 0, 0, 0.34)");
+  ctx.fillStyle = lowerShade;
+  ctx.fillRect(-w, -h, w * 2, h * 2);
 }
 
 function drawMidline(ctx, width, height) {
   ctx.save();
-  ctx.strokeStyle = "rgba(237, 252, 233, 0.35)";
-  ctx.lineWidth = 2;
-  ctx.setLineDash([7, 8]);
+  ctx.strokeStyle = "rgba(38, 214, 179, 0.22)";
+  ctx.lineWidth = 7;
   ctx.beginPath();
-  ctx.moveTo(width * 0.5, height * 0.15);
-  ctx.bezierCurveTo(width * 0.48, height * 0.34, width * 0.52, height * 0.62, width * 0.49, height * 0.86);
+  ctx.moveTo(width * 0.5, height * 0.13);
+  ctx.bezierCurveTo(width * 0.47, height * 0.31, width * 0.54, height * 0.55, width * 0.49, height * 0.84);
   ctx.stroke();
+  ctx.strokeStyle = "rgba(245, 242, 234, 0.38)";
+  ctx.lineWidth = 1.4;
+  ctx.setLineDash([6, 7]);
+  ctx.beginPath();
+  ctx.moveTo(width * 0.5, height * 0.11);
+  ctx.bezierCurveTo(width * 0.47, height * 0.3, width * 0.54, height * 0.56, width * 0.49, height * 0.87);
+  ctx.stroke();
+  ctx.setLineDash([]);
   ctx.restore();
 }
 
-function drawSulci(ctx, width, height) {
+function drawCorticalFolds(ctx, w, h) {
   const curves = [
-    [0.22, 0.33, 0.36, 0.22, 0.43, 0.42, 0.31, 0.5],
-    [0.21, 0.52, 0.34, 0.42, 0.42, 0.57, 0.3, 0.7],
-    [0.59, 0.34, 0.7, 0.22, 0.82, 0.4, 0.72, 0.52],
-    [0.58, 0.55, 0.68, 0.44, 0.84, 0.58, 0.72, 0.73],
-    [0.39, 0.24, 0.47, 0.36, 0.42, 0.53, 0.49, 0.72],
-    [0.61, 0.25, 0.52, 0.37, 0.59, 0.54, 0.52, 0.73],
+    [-0.5, -0.26, -0.24, -0.42, 0.08, -0.28, -0.1, -0.05],
+    [-0.57, 0.02, -0.27, -0.1, 0.13, 0.06, -0.18, 0.24],
+    [-0.36, 0.38, -0.08, 0.16, 0.2, 0.3, 0.04, 0.48],
+    [-0.08, -0.38, 0.08, -0.16, -0.02, 0.06, 0.15, 0.31],
+    [-0.47, -0.04, -0.2, 0.04, -0.32, 0.2, -0.52, 0.18],
+    [-0.08, 0.16, 0.2, 0.02, 0.3, 0.22, 0.16, 0.42],
   ];
+  ctx.save();
+  ctx.lineCap = "round";
   for (const curve of curves) {
+    ctx.strokeStyle = "rgba(38, 214, 179, 0.13)";
+    ctx.lineWidth = 5;
     ctx.beginPath();
-    ctx.moveTo(curve[0] * width, curve[1] * height);
+    ctx.moveTo(curve[0] * w, curve[1] * h);
     ctx.bezierCurveTo(
-      curve[2] * width,
-      curve[3] * height,
-      curve[4] * width,
-      curve[5] * height,
-      curve[6] * width,
-      curve[7] * height,
+      curve[2] * w,
+      curve[3] * h,
+      curve[4] * w,
+      curve[5] * h,
+      curve[6] * w,
+      curve[7] * h,
     );
     ctx.stroke();
+    ctx.strokeStyle = "rgba(245, 242, 234, 0.34)";
+    ctx.lineWidth = 1.2;
+    ctx.stroke();
   }
+  ctx.restore();
+}
+
+function drawActivationNetwork(ctx, width, height, spots, values) {
+  ctx.save();
+  ctx.globalCompositeOperation = "screen";
+  ctx.lineCap = "round";
+  for (let index = 0; index < spots.length - 1; index += 1) {
+    const [idA, xA, yA] = spots[index];
+    const [idB, xB, yB] = spots[index + 1];
+    const signal = clamp(((values[idA] || 0) + (values[idB] || 0)) / 2);
+    if (signal < 0.03) continue;
+    ctx.strokeStyle = `rgba(38, 214, 179, ${0.08 + signal * 0.28})`;
+    ctx.lineWidth = 1 + signal * 3;
+    ctx.beginPath();
+    ctx.moveTo(xA * width, yA * height);
+    ctx.lineTo(xB * width, yB * height);
+    ctx.stroke();
+  }
+  ctx.restore();
 }
 
 function drawBlob(ctx, x, y, radius, color, value) {
   ctx.save();
   ctx.globalCompositeOperation = "screen";
   const gradient = ctx.createRadialGradient(x, y, 0, x, y, radius);
-  gradient.addColorStop(0, colorWithAlpha(color, 0.9 * value));
-  gradient.addColorStop(0.42, colorWithAlpha(color, 0.45 * value));
+  gradient.addColorStop(0, colorWithAlpha(color, 0.95 * value));
+  gradient.addColorStop(0.36, colorWithAlpha(color, 0.5 * value));
   gradient.addColorStop(1, colorWithAlpha(color, 0));
   ctx.fillStyle = gradient;
   ctx.beginPath();
   ctx.arc(x, y, radius, 0, Math.PI * 2);
   ctx.fill();
+
+  if (value > 0.2) {
+    const pixel = Math.max(2, Math.round(radius / 12));
+    ctx.globalAlpha = Math.min(0.75, value);
+    ctx.fillStyle = colorWithAlpha(color, 0.55);
+    for (let i = -2; i <= 2; i += 1) {
+      for (let j = -2; j <= 2; j += 1) {
+        if (Math.abs(i) + Math.abs(j) > 3) continue;
+        ctx.fillRect(x + i * pixel * 2, y + j * pixel * 2, pixel, pixel);
+      }
+    }
+  }
+  ctx.restore();
+}
+
+function drawNeuralNodes(ctx, width, height, spots, values) {
+  ctx.save();
+  for (const [id, x, y] of spots) {
+    const value = clamp(values[id]);
+    if (value < 0.06) continue;
+    const channel = channels.find((item) => item.id === id);
+    ctx.fillStyle = colorWithAlpha(channel.color, 0.7);
+    ctx.strokeStyle = "rgba(245, 242, 234, 0.62)";
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.arc(x * width, y * height, 2 + value * 4, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.stroke();
+  }
   ctx.restore();
 }
 
@@ -849,13 +958,13 @@ function drawGraph() {
   const current = els.video.currentTime || 0;
 
   ctx.clearRect(0, 0, width, height);
-  ctx.fillStyle = "#fffdfa";
+  ctx.fillStyle = "#080d13";
   ctx.fillRect(0, 0, width, height);
 
-  ctx.strokeStyle = "rgba(0, 60, 51, 0.13)";
+  ctx.strokeStyle = "rgba(237, 252, 233, 0.12)";
   ctx.lineWidth = 1;
   ctx.font = `${12 * ratio}px Inter, system-ui, sans-serif`;
-  ctx.fillStyle = "#616161";
+  ctx.fillStyle = "rgba(245, 242, 234, 0.66)";
   ctx.textAlign = "right";
   ctx.textBaseline = "middle";
 
@@ -875,12 +984,12 @@ function drawGraph() {
   ctx.textBaseline = "top";
   for (let second = 0; second <= seconds; second += tickEvery) {
     const x = padding.left + (second / seconds) * plotWidth;
-    ctx.strokeStyle = second % (tickEvery * 2) === 0 ? "rgba(0, 60, 51, 0.18)" : "rgba(0, 60, 51, 0.08)";
+    ctx.strokeStyle = second % (tickEvery * 2) === 0 ? "rgba(237, 252, 233, 0.15)" : "rgba(237, 252, 233, 0.07)";
     ctx.beginPath();
     ctx.moveTo(x, padding.top);
     ctx.lineTo(x, padding.top + plotHeight);
     ctx.stroke();
-    ctx.fillStyle = "#6d767f";
+    ctx.fillStyle = "rgba(245, 242, 234, 0.58)";
     ctx.fillText(`${second}s`, x, padding.top + plotHeight + 12);
   }
 
@@ -912,7 +1021,7 @@ function drawGraph() {
 
   const cursorX = padding.left + (clamp(current / Math.max(state.duration, 1)) * plotWidth);
   ctx.save();
-  ctx.strokeStyle = "#17171c";
+  ctx.strokeStyle = "#f5f2ea";
   ctx.lineWidth = 1.5 * ratio;
   ctx.beginPath();
   ctx.moveTo(cursorX, padding.top - 4);
