@@ -460,14 +460,15 @@ function renderAnalysis(force = false) {
 
   const score = average(rows.map((row) => row.engagement));
   const verdict = engagementVerdict(score);
+  const profile = buildAnalysisProfile(rows, score);
   const observedLabel = `${rows.length}/${state.seconds} seconds read`;
   setBadge(els.analysisBadge, observedLabel, els.video.paused ? "ready" : "active");
   els.engagementScore.textContent = String(Math.round(score * 100));
   els.engagementVerdict.textContent = verdict.label;
-  els.engagementSummary.textContent = buildEngagementSummary(rows, score, verdict);
-  renderTimestampItems(buildTimestampSegments(rows));
-  renderList(els.improvementList, buildImprovements(rows, score));
-  renderList(els.campaignList, buildCampaignFits(rows, score));
+  els.engagementSummary.textContent = buildEngagementSummary(rows, score, verdict, profile);
+  renderTimestampItems(buildTimestampSegments(rows, profile));
+  renderList(els.improvementList, buildImprovements(rows, score, profile));
+  renderList(els.campaignList, buildCampaignFits(rows, score, profile));
 }
 
 function getObservedRows() {
@@ -501,6 +502,54 @@ function getObservedRows() {
   return rows;
 }
 
+function buildAnalysisProfile(rows, score) {
+  const firstRows = rows.filter((row) => row.second < 3);
+  const openingRows = firstRows.length ? firstRows : rows.slice(0, Math.min(3, rows.length));
+  const finishRows = rows.slice(Math.max(0, rows.length - Math.min(3, rows.length)));
+  const averages = Object.fromEntries(
+    channels.map((channel) => [channel.id, average(rows.map((row) => row.values[channel.id]))]),
+  );
+  const metricAverages = Object.fromEntries(
+    ["brightness", "saturation", "redBias", "blueBias", "contrast", "motion", "audio"].map((key) => [
+      key,
+      average(rows.map((row) => row.metrics[key] || 0)),
+    ]),
+  );
+  const peak = maxBy(rows, (row) => row.engagement);
+  const low = minBy(rows, (row) => row.engagement);
+  const motionPeak = maxBy(rows, (row) => row.motionSignal + row.values.visual * 0.25);
+  const audioPeak = maxBy(rows, (row) => row.audioSignal + row.values.language * 0.28);
+  const saliencePeak = maxBy(rows, (row) => row.values.salience);
+  const defaultPeak = maxBy(rows, (row) => row.values.default);
+  const openingScore = average(openingRows.map((row) => row.engagement));
+  const finishScore = average(finishRows.map((row) => row.engagement));
+  const deltas = rows.slice(1).map((row, index) => Math.abs(row.engagement - rows[index].engagement));
+  const dominantAverage = channels.reduce((best, channel) => {
+    return averages[channel.id] > averages[best.id] ? channel : best;
+  }, channels[0]);
+  const profile = {
+    score,
+    averages,
+    metricAverages,
+    peak,
+    low,
+    motionPeak,
+    audioPeak,
+    saliencePeak,
+    defaultPeak,
+    openingScore,
+    finishScore,
+    trend: finishScore - openingScore,
+    engagementRange: peak.engagement - low.engagement,
+    volatility: average(deltas),
+    visualEnergy: average(rows.map((row) => (row.values.visual + row.values.attention + row.motionSignal) / 3)),
+    messageEnergy: average(rows.map((row) => (row.values.language + row.audioSignal) / 2)),
+    dominantAverage,
+  };
+  profile.primaryDriver = describeProfileDriver(profile);
+  return profile;
+}
+
 function engagementVerdict(score) {
   if (score >= 0.74) return { label: "Strong watch potential", tone: "strong" };
   if (score >= 0.58) return { label: "Good, with room to sharpen", tone: "promising" };
@@ -508,40 +557,199 @@ function engagementVerdict(score) {
   return { label: "Likely to lose viewers", tone: "low" };
 }
 
-function buildEngagementSummary(rows, score, verdict) {
-  const firstThree = rows.filter((row) => row.second < 3);
-  const firstScore = firstThree.length ? average(firstThree.map((row) => row.engagement)) : score;
-  const peak = maxBy(rows, (row) => row.engagement);
-  const audio = average(rows.map((row) => row.audioSignal));
-  const motion = average(rows.map((row) => row.motionSignal));
-  const opening = firstScore >= 0.58 ? "The first few seconds are doing enough to keep people watching." : "The first few seconds need a clearer reason to keep watching.";
-  const driver = motion > audio ? "The video is mainly helped by visual movement." : "The video is mainly helped by sound, voice, or rhythm.";
-  return `${verdict.label}. ${opening} ${driver} The strongest moment appears around ${formatTimestamp(peak.second)}.`;
+function describeProfileDriver(profile) {
+  if (profile.messageEnergy > profile.visualEnergy + 0.08) return "sound, voice, or message clarity";
+  if (profile.visualEnergy > profile.messageEnergy + 0.08) return "movement and visual change";
+  if (profile.averages.salience > 0.4) return "standout beats and contrast";
+  if (profile.averages.default > 0.58) return "steady pacing, which may need a clearer story";
+  return profile.dominantAverage.label.toLowerCase();
 }
 
-function buildTimestampSegments(rows) {
-  const segments = [];
-  for (const row of rows) {
-    const moment = classifyMoment(row);
-    const previous = segments[segments.length - 1];
-    if (previous && previous.key === moment.key && row.second <= previous.end + 1) {
-      previous.end = row.second;
-      previous.engagement = Math.max(previous.engagement, row.engagement);
-      continue;
-    }
-    segments.push({
-      key: moment.key,
-      start: row.second,
-      end: row.second,
-      engagement: row.engagement,
-      title: moment.title,
-      body: moment.body,
-    });
+function describeRowDriver(row) {
+  const candidates = [
+    ["movement", row.motionSignal],
+    ["sound or voice", row.audioSignal],
+    ["visual change", row.values.visual],
+    ["message density", row.values.language],
+    ["standout contrast", row.values.salience],
+    ["steady pacing", row.values.default],
+  ];
+  return candidates.reduce((best, item) => (item[1] > best[1] ? item : best), candidates[0])[0];
+}
+
+function describeLowReason(row) {
+  if (row.values.default > 0.58) return "the signal is quiet and steady";
+  if (row.motionSignal < 0.22) return "movement is low";
+  if (row.audioSignal < 0.2 && row.values.language < 0.28) return "sound and message cues are light";
+  if (row.values.salience < 0.28) return "there is not much contrast or novelty";
+  return "the main attention signals flatten out";
+}
+
+function expandTimestampWindow(rows, targetSecond, predicate, maxRadius = 2) {
+  const bySecond = new Map(rows.map((row) => [row.second, row]));
+  let start = targetSecond;
+  let end = targetSecond;
+  while (bySecond.has(start - 1) && targetSecond - (start - 1) <= maxRadius && predicate(bySecond.get(start - 1))) {
+    start -= 1;
+  }
+  while (bySecond.has(end + 1) && end + 1 - targetSecond <= maxRadius && predicate(bySecond.get(end + 1))) {
+    end += 1;
+  }
+  return { start, end };
+}
+
+function pushTimestampItem(items, rows, row, key, title, body, predicate, maxRadius = 2) {
+  if (!row || items.some((item) => item.key === key)) return;
+  const range = expandTimestampWindow(rows, row.second, predicate, maxRadius);
+  items.push({
+    key,
+    start: range.start,
+    end: range.end,
+    engagement: row.engagement,
+    title,
+    body,
+  });
+}
+
+function buildEngagementSummary(rows, score, verdict, profile) {
+  const trendText =
+    profile.trend >= 0.08
+      ? `Engagement builds toward the end (${formatSignedPercent(profile.trend)}).`
+      : profile.trend <= -0.08
+        ? `Engagement fades by the end (${formatSignedPercent(profile.trend)}), so the close may need a stronger payoff.`
+        : "Engagement stays fairly even across the observed seconds.";
+  const riskText =
+    profile.engagementRange >= 0.16
+      ? `The weakest pocket is around ${formatTimestamp(profile.low.second)}, where ${describeLowReason(profile.low)}.`
+      : "There is no sharp drop yet, so the next improvement is about making the best moment arrive sooner.";
+  return `${verdict.label}. Average engagement is ${formatPercent(score)} and the opening is ${formatPercent(profile.openingScore)}. The main driver is ${profile.primaryDriver}; the strongest moment is around ${formatTimestamp(profile.peak.second)} at ${formatPercent(profile.peak.engagement)}. ${trendText} ${riskText}`;
+}
+
+function buildTimestampSegments(rows, profile) {
+  const items = [];
+  const openingRow = rows.find((row) => row.second < 3) || rows[0];
+  const openingBody =
+    profile.openingScore >= profile.score + 0.06
+      ? `The opening is stronger than the video average. Keep the early ${describeRowDriver(openingRow)} clear and move the offer in quickly.`
+      : profile.openingScore < 0.5
+        ? `The hook starts soft at ${formatPercent(profile.openingScore)}. Show the result, conflict, or product proof sooner.`
+        : `The opening is serviceable at ${formatPercent(profile.openingScore)}. It needs one sharper promise to stop the scroll.`;
+  pushTimestampItem(
+    items,
+    rows,
+    openingRow,
+    "opening",
+    "Opening hook",
+    openingBody,
+    (row) => row.second < 3,
+    2,
+  );
+
+  pushTimestampItem(
+    items,
+    rows,
+    profile.peak,
+    "peak",
+    "Best attention pocket",
+    `This is the strongest observed beat at ${formatPercent(profile.peak.engagement)}. It is mainly driven by ${describeRowDriver(profile.peak)}, so this is a good place for the key proof point or offer.`,
+    (row) => row.engagement >= Math.max(profile.score + 0.05, profile.peak.engagement - 0.08),
+    2,
+  );
+
+  if (profile.engagementRange >= 0.1) {
+    pushTimestampItem(
+      items,
+      rows,
+      profile.low,
+      "low",
+      "Drop risk",
+      `This is the weakest pocket at ${formatPercent(profile.low.engagement)} because ${describeLowReason(profile.low)}. Trim it or add a new visual or text cue.`,
+      (row) => row.engagement <= Math.min(profile.score - 0.04, profile.low.engagement + 0.08),
+      2,
+    );
+  } else if (profile.low.engagement < 0.48 || profile.averages.default > 0.58) {
+    pushTimestampItem(
+      items,
+      rows,
+      profile.defaultPeak,
+      "low-energy",
+      "Low energy stretch",
+      `The observed section stays low at about ${formatPercent(profile.low.engagement)}-${formatPercent(profile.peak.engagement)}. Add a sharper hook, visual change, or clearer reason to keep watching.`,
+      (row) => row.engagement < 0.5 || row.values.default > 0.58,
+      3,
+    );
   }
 
-  if (segments.length <= 6) return segments;
-  const strongest = [...segments].sort((a, b) => b.engagement - a.engagement).slice(0, 6);
-  return strongest.sort((a, b) => a.start - b.start);
+  if (profile.motionPeak.motionSignal >= 0.28 || profile.motionPeak.values.visual >= profile.averages.visual + 0.08) {
+    pushTimestampItem(
+      items,
+      rows,
+      profile.motionPeak,
+      "motion",
+      "Movement lift",
+      `The visual pace rises here. Use this beat for a reveal, before-after switch, product motion, or creator gesture.`,
+      (row) => row.motionSignal >= Math.max(0.24, profile.motionPeak.motionSignal - 0.12),
+      1,
+    );
+  }
+
+  if (profile.audioPeak.audioSignal >= 0.3 || profile.audioPeak.values.language >= 0.34) {
+    pushTimestampItem(
+      items,
+      rows,
+      profile.audioPeak,
+      "audio",
+      "Sound or message cue",
+      `Audio/message energy peaks here. Add captions or a short on-screen phrase so the same idea works with sound off.`,
+      (row) => row.audioSignal >= Math.max(0.24, profile.audioPeak.audioSignal - 0.12),
+      1,
+    );
+  }
+
+  if (profile.saliencePeak.values.salience >= Math.max(0.34, profile.averages.salience + 0.06)) {
+    pushTimestampItem(
+      items,
+      rows,
+      profile.saliencePeak,
+      "salience",
+      "Standout beat",
+      `This moment has the clearest novelty spike. It can carry a price cue, product drop, transformation, or call to action.`,
+      (row) => row.values.salience >= Math.max(0.3, profile.saliencePeak.values.salience - 0.08),
+      1,
+    );
+  }
+
+  if (rows.length >= 5) {
+    const finishRow = rows[rows.length - 1];
+    const finishBody =
+      profile.trend <= -0.08
+        ? `The ending is weaker than the opening. Move the call to action closer to ${formatTimestamp(profile.peak.second)} or end sooner.`
+        : profile.trend >= 0.08
+          ? "The video gains strength near the end. Bring a preview of this payoff into the first seconds."
+          : "The close stays stable. Make sure the final frame gives one direct next step.";
+    pushTimestampItem(
+      items,
+      rows,
+      finishRow,
+      "finish",
+      "Ending read",
+      finishBody,
+      (row) => row.second >= finishRow.second - 2,
+      2,
+    );
+  }
+
+  if (items.length < 3) {
+    for (const row of rows) {
+      const moment = classifyMoment(row);
+      pushTimestampItem(items, rows, row, `fallback-${moment.key}`, moment.title, moment.body, (item) => classifyMoment(item).key === moment.key, 1);
+      if (items.length >= 3) break;
+    }
+  }
+
+  return items
+    .sort((a, b) => a.start - b.start || b.engagement - a.engagement)
+    .slice(0, 6);
 }
 
 function classifyMoment(row) {
@@ -588,58 +796,61 @@ function classifyMoment(row) {
   };
 }
 
-function buildImprovements(rows, score) {
-  const firstRows = rows.filter((row) => row.second < 3);
-  const firstScore = firstRows.length ? average(firstRows.map((row) => row.engagement)) : score;
-  const attention = average(rows.map((row) => row.values.attention));
-  const salience = average(rows.map((row) => row.values.salience));
-  const defaultMode = average(rows.map((row) => row.values.default));
-  const audio = average(rows.map((row) => row.audioSignal));
-  const motion = average(rows.map((row) => row.motionSignal));
+function buildImprovements(rows, score, profile) {
   const items = [];
 
-  if (firstScore < 0.58) {
-    items.push("Show the most interesting visual, line, or result in the first 2 seconds.");
+  if (profile.openingScore < 0.56) {
+    items.push(`Move the strongest moment from ${formatTimestamp(profile.peak.second)} into the first 2 seconds, or preview it with text.`);
   }
-  if (motion < 0.28 && attention < 0.5) {
-    items.push("Add one clear change: a tighter cut, camera move, product reveal, or before-after switch.");
+  if (profile.engagementRange >= 0.14) {
+    items.push(`Fix the dip around ${formatTimestamp(profile.low.second)} by cutting faster or adding a new visual cue.`);
   }
-  if (audio < 0.32) {
-    items.push("Add stronger sound or captions so the promise is clear with sound on or off.");
+  if (profile.visualEnergy < 0.38) {
+    items.push("Add one obvious visual change: a tighter crop, camera move, product reveal, or before-after switch.");
   }
-  if (defaultMode > 0.55 || salience < 0.32) {
-    items.push("Trim slow parts and move the offer or transformation closer to the strongest moments.");
+  if (profile.messageEnergy < 0.3) {
+    items.push("Add a short caption or spoken promise so the viewer understands the point without guessing.");
+  } else if (profile.messageEnergy > profile.visualEnergy + 0.12) {
+    items.push("Keep captions on screen during the audio-led moments so the message survives silent viewing.");
   }
-  if (score >= 0.68) {
-    items.push("Keep the core edit, then test two different opening hooks.");
+  if (profile.averages.salience < 0.32) {
+    items.push("Create a clearer standout beat: transformation, price cue, surprising detail, or stronger contrast.");
+  }
+  if (profile.trend <= -0.08) {
+    items.push("End earlier or move the call to action before the late drop.");
+  } else if (profile.trend >= 0.08) {
+    items.push("Bring a preview of the ending payoff into the opening hook.");
+  }
+  if (score >= 0.68 && profile.openingScore >= 0.58) {
+    items.push("The base edit is working. Test two hooks: one benefit-led and one curiosity-led.");
   }
   if (items.length === 0) {
-    items.push("Make the hook clearer, keep the strongest proof point, and end with a direct next step.");
+    items.push(`Keep the proof around ${formatTimestamp(profile.peak.second)}, make the hook more explicit, and end with one direct next step.`);
   }
   return items.slice(0, 4);
 }
 
-function buildCampaignFits(rows, score) {
-  const visual = average(rows.map((row) => row.values.visual));
-  const audio = average(rows.map((row) => row.audioSignal));
-  const language = average(rows.map((row) => row.values.language));
-  const salience = average(rows.map((row) => row.values.salience));
-  const motion = average(rows.map((row) => row.motionSignal));
+function buildCampaignFits(rows, score, profile) {
   const fits = [];
 
-  if (visual > 0.38 && motion > 0.28) {
-    fits.push("Awareness ads where fast visual proof matters.");
+  if (profile.visualEnergy > 0.42 && profile.motionPeak.second <= 4) {
+    fits.push("Cold awareness ads, especially if the opening frame shows the product or result immediately.");
+  } else if (profile.visualEnergy > 0.42) {
+    fits.push("Awareness edits after moving the strongest visual beat closer to the start.");
   }
-  if (audio > 0.38 || language > 0.34) {
-    fits.push("Creator testimonial or explainer with strong captions.");
+  if (profile.messageEnergy > 0.36) {
+    fits.push("Creator testimonial, explainer, or founder-led ad with large captions.");
   }
-  if (salience > 0.38) {
-    fits.push("Launch, product drop, limited-time offer, or before-after story.");
+  if (profile.averages.salience > 0.36 || profile.saliencePeak.values.salience > 0.46) {
+    fits.push("Launch, product drop, limited-time offer, or before-after creative.");
   }
-  if (score < 0.5) {
-    fits.push("Use for retargeting only after the opening is tighter.");
+  if (profile.averages.default > 0.58 && score < 0.58) {
+    fits.push("Warm retargeting or landing-page support, not broad cold traffic yet.");
+  }
+  if (score < 0.5 || profile.openingScore < 0.48) {
+    fits.push("Retargeting only until the first 2 seconds are sharper.");
   } else {
-    fits.push("A/B test as paid social with different hooks, captions, and calls to action.");
+    fits.push("Paid social A/B test with different hooks, captions, and calls to action.");
   }
   return fits.slice(0, 4);
 }
@@ -690,6 +901,19 @@ function average(values) {
 
 function maxBy(items, score) {
   return items.reduce((best, item) => (score(item) > score(best) ? item : best), items[0]);
+}
+
+function minBy(items, score) {
+  return items.reduce((best, item) => (score(item) < score(best) ? item : best), items[0]);
+}
+
+function formatPercent(value) {
+  return `${Math.round(clamp(value) * 100)}%`;
+}
+
+function formatSignedPercent(value) {
+  const rounded = Math.round(value * 100);
+  return `${rounded > 0 ? "+" : ""}${rounded}%`;
 }
 
 function drawBrain(values) {
