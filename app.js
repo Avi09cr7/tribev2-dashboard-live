@@ -56,6 +56,8 @@ const els = {
   modeBadge: document.getElementById("modeBadge"),
   videoName: document.getElementById("videoName"),
   trCount: document.getElementById("trCount"),
+  brainStage: document.getElementById("brainStage"),
+  brainModelStatus: document.getElementById("brainModelStatus"),
   brainCanvas: document.getElementById("brainCanvas"),
   graphCanvas: document.getElementById("graphCanvas"),
   timelinePanel: document.getElementById("timelinePanel"),
@@ -97,9 +99,42 @@ const state = {
   samplingErrorShown: false,
 };
 
-const brainCtx = els.brainCanvas.getContext("2d");
 const graphCtx = els.graphCanvas.getContext("2d");
 const sampleCtx = els.sampleCanvas.getContext("2d", { willReadFrequently: true });
+
+const brainModelPath = "assets/models/nih-human-brain.glb";
+const brainModelRemoteFallback = "https://raw.githubusercontent.com/Avi09cr7/tribev2-dashboard-live/main/assets/models/nih-human-brain.glb";
+const brainTargets = Object.fromEntries(channels.map((channel) => [channel.id, 0]));
+const brainViz = {
+  THREE: null,
+  renderer: null,
+  scene: null,
+  camera: null,
+  root: null,
+  model: null,
+  modelBaseScale: 1,
+  current: { ...brainTargets },
+  target: { ...brainTargets },
+  hotspots: [],
+  signalLinks: [],
+  particles: null,
+  ready: false,
+  loading: false,
+  failed: false,
+  startTime: performance.now(),
+  lastFrameAt: performance.now(),
+  pointer: {
+    dragging: false,
+    lastX: 0,
+    lastY: 0,
+    rotationX: -0.12,
+    rotationY: -0.28,
+    velocityX: 0,
+    velocityY: 0,
+  },
+};
+
+window.__tribeBrainViz = brainViz;
 
 function createSeries(length) {
   const safeLength = Math.max(1, length);
@@ -916,251 +951,390 @@ function formatSignedPercent(value) {
   return `${rounded > 0 ? "+" : ""}${rounded}%`;
 }
 
-function drawBrain(values) {
-  const canvas = els.brainCanvas;
-  const ctx = brainCtx;
-  const width = canvas.width;
-  const height = canvas.height;
-  ctx.clearRect(0, 0, width, height);
+function setBrainStatus(status, message) {
+  els.brainStage.dataset.status = status;
+  if (message) {
+    els.brainModelStatus.textContent = message;
+  }
+}
 
-  const background = ctx.createRadialGradient(width * 0.5, height * 0.42, 0, width * 0.5, height * 0.5, width * 0.72);
-  background.addColorStop(0, "#102639");
-  background.addColorStop(0.55, "#08111b");
-  background.addColorStop(1, "#03070b");
-  ctx.fillStyle = background;
-  ctx.fillRect(0, 0, width, height);
+function updateBrainScene(values) {
+  for (const channel of channels) {
+    brainViz.target[channel.id] = clamp(values[channel.id]);
+  }
+}
 
-  ctx.save();
-  ctx.globalAlpha = 0.22;
-  ctx.fillStyle = "#26d6b3";
-  const grid = Math.max(10, Math.floor(width / 44));
-  for (let x = grid; x < width; x += grid) {
-    for (let y = grid; y < height; y += grid) {
-      if ((x / grid + y / grid) % 2 === 0) ctx.fillRect(x, y, 2, 2);
+async function initBrainScene() {
+  if (brainViz.loading || brainViz.ready) return;
+  brainViz.loading = true;
+  setBrainStatus("loading", "Loading 3D brain");
+
+  try {
+    const [THREE, { GLTFLoader }] = await Promise.all([
+      import("three"),
+      import("three/addons/loaders/GLTFLoader.js"),
+    ]);
+    brainViz.THREE = THREE;
+
+    const renderer = new THREE.WebGLRenderer({
+      canvas: els.brainCanvas,
+      alpha: true,
+      antialias: true,
+      powerPreference: "high-performance",
+      preserveDrawingBuffer: true,
+    });
+    renderer.outputColorSpace = THREE.SRGBColorSpace;
+    renderer.toneMapping = THREE.ACESFilmicToneMapping;
+    renderer.toneMappingExposure = 1.18;
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+    brainViz.renderer = renderer;
+
+    const scene = new THREE.Scene();
+    scene.fog = new THREE.FogExp2(0x03070d, 0.16);
+    brainViz.scene = scene;
+
+    const camera = new THREE.PerspectiveCamera(34, 1, 0.1, 100);
+    camera.position.set(0, 0.06, 5.75);
+    brainViz.camera = camera;
+
+    const root = new THREE.Group();
+    scene.add(root);
+    brainViz.root = root;
+
+    addBrainLighting(THREE, scene);
+    addBrainBackdrop(THREE, scene);
+
+    const loader = new GLTFLoader();
+    const gltf = await loadBrainModel(loader);
+    const model = gltf.scene || gltf.scenes?.[0];
+    if (!model) throw new Error("The downloaded brain model did not contain a scene.");
+    prepareBrainModel(THREE, model);
+    root.add(model);
+    brainViz.model = model;
+
+    createBrainSignals(THREE, root);
+    attachBrainPointerEvents();
+    syncBrainSceneSize();
+    brainViz.ready = true;
+    brainViz.failed = false;
+    setBrainStatus("ready", "3D brain ready");
+    requestAnimationFrame(renderBrainScene);
+  } catch (error) {
+    console.error("3D brain failed to load", error);
+    brainViz.failed = true;
+    setBrainStatus("failed", "3D brain unavailable");
+  } finally {
+    brainViz.loading = false;
+  }
+}
+
+async function loadBrainModel(loader) {
+  const urls = [brainModelPath];
+  if (window.location.protocol === "file:") urls.push(brainModelRemoteFallback);
+  let lastError = null;
+  for (const url of urls) {
+    try {
+      return await loader.loadAsync(url);
+    } catch (error) {
+      lastError = error;
     }
   }
-  ctx.restore();
+  throw lastError || new Error("Brain model could not be loaded.");
+}
 
-  drawBrainBaseShadow(ctx, width, height);
-  drawHemisphere(ctx, width * 0.36, height * 0.5, width * 0.34, height * 0.72, -1);
-  drawHemisphere(ctx, width * 0.64, height * 0.5, width * 0.34, height * 0.72, 1);
+function addBrainLighting(THREE, scene) {
+  scene.add(new THREE.HemisphereLight(0xb6fff0, 0x16090c, 1.55));
 
-  const spots = [
-    ["visual", 0.27, 0.62, 0.18],
-    ["visual", 0.73, 0.62, 0.18],
-    ["auditory", 0.31, 0.55, 0.14],
-    ["auditory", 0.69, 0.55, 0.14],
-    ["language", 0.34, 0.38, 0.13],
-    ["attention", 0.48, 0.28, 0.17],
-    ["attention", 0.56, 0.3, 0.15],
-    ["motor", 0.5, 0.48, 0.16],
-    ["salience", 0.43, 0.42, 0.14],
-    ["salience", 0.59, 0.44, 0.12],
-    ["default", 0.49, 0.66, 0.18],
+  const key = new THREE.DirectionalLight(0xffffff, 2.1);
+  key.position.set(2.8, 3.4, 4.4);
+  scene.add(key);
+
+  const rim = new THREE.DirectionalLight(0x27f3cc, 1.8);
+  rim.position.set(-3.2, 1.5, -3.8);
+  scene.add(rim);
+
+  const warm = new THREE.PointLight(0xff7759, 16, 7.5);
+  warm.position.set(2.2, -1.4, 2.8);
+  scene.add(warm);
+}
+
+function addBrainBackdrop(THREE, scene) {
+  const geometry = new THREE.BufferGeometry();
+  const count = 130;
+  const positions = new Float32Array(count * 3);
+  for (let index = 0; index < count; index += 1) {
+    const radius = 1.8 + Math.random() * 2.8;
+    const angle = Math.random() * Math.PI * 2;
+    positions[index * 3] = Math.cos(angle) * radius;
+    positions[index * 3 + 1] = (Math.random() - 0.5) * 3.3;
+    positions[index * 3 + 2] = -1.8 - Math.random() * 2.5;
+  }
+  geometry.setAttribute("position", new THREE.BufferAttribute(positions, 3));
+  const material = new THREE.PointsMaterial({
+    color: 0x7ef7d4,
+    size: 0.026,
+    transparent: true,
+    opacity: 0.2,
+    depthWrite: false,
+    blending: THREE.AdditiveBlending,
+  });
+  brainViz.particles = new THREE.Points(geometry, material);
+  scene.add(brainViz.particles);
+}
+
+function prepareBrainModel(THREE, model) {
+  model.updateMatrixWorld(true);
+  const box = new THREE.Box3().setFromObject(model);
+  const size = box.getSize(new THREE.Vector3());
+  const center = box.getCenter(new THREE.Vector3());
+  const maxAxis = Math.max(size.x, size.y, size.z, 1);
+  const baseScale = 3.1 / maxAxis;
+
+  model.scale.setScalar(baseScale);
+  model.position.set(-center.x * baseScale, -center.y * baseScale, -center.z * baseScale);
+  model.rotation.set(0.08, -0.28, 0.03);
+  brainViz.modelBaseScale = baseScale;
+
+  const warmTissue = new THREE.Color(0xd8a39b);
+  model.traverse((node) => {
+    if (!node.isMesh) return;
+    const original = node.material || {};
+    const originalColor = original.color?.clone?.() || warmTissue.clone();
+    const material = new THREE.MeshStandardMaterial({
+      color: originalColor.lerp(warmTissue, 0.62),
+      map: original.map || null,
+      normalMap: original.normalMap || null,
+      roughness: 0.58,
+      metalness: 0.03,
+      transparent: true,
+      opacity: 0.96,
+      emissive: new THREE.Color(0x2a1416),
+      emissiveIntensity: 0.2,
+    });
+    node.material = material;
+    node.castShadow = false;
+    node.receiveShadow = false;
+  });
+}
+
+function createBrainSignals(THREE, root) {
+  const positions = [
+    { id: "visual", position: [-0.95, -0.12, 0.58], scale: 0.48 },
+    { id: "visual", position: [0.94, -0.1, 0.5], scale: 0.43 },
+    { id: "auditory", position: [-1.02, -0.48, 0.28], scale: 0.4 },
+    { id: "language", position: [-0.58, 0.44, 0.64], scale: 0.38 },
+    { id: "attention", position: [0.0, 0.72, 0.72], scale: 0.52 },
+    { id: "motor", position: [0.08, 0.18, 0.86], scale: 0.42 },
+    { id: "salience", position: [0.58, 0.28, 0.68], scale: 0.42 },
+    { id: "default", position: [0.02, -0.62, 0.5], scale: 0.46 },
+  ];
+  const byId = new Map();
+
+  for (const item of positions) {
+    const channel = channels.find((entry) => entry.id === item.id);
+    const sprite = createGlowSprite(THREE, channel.color);
+    sprite.position.set(...item.position);
+    sprite.scale.setScalar(item.scale * 0.65);
+    sprite.material.opacity = 0.08;
+    root.add(sprite);
+
+    const ring = createSignalRing(THREE, channel.color, item.scale);
+    ring.position.copy(sprite.position);
+    root.add(ring);
+
+    const hotspot = { ...item, channel, sprite, ring };
+    brainViz.hotspots.push(hotspot);
+    if (!byId.has(item.id)) byId.set(item.id, hotspot);
+  }
+
+  const pairs = [
+    ["visual", "attention"],
+    ["attention", "motor"],
+    ["attention", "salience"],
+    ["auditory", "language"],
+    ["language", "salience"],
+    ["default", "attention"],
   ];
 
-  drawActivationNetwork(ctx, width, height, spots, values);
-  for (const [id, x, y, radius] of spots) {
-    const channel = channels.find((item) => item.id === id);
-    const value = clamp(values[id]);
-    if (value <= 0.01) continue;
-    drawBlob(ctx, x * width, y * height, radius * width * (0.45 + value * 0.5), channel.color, value);
+  for (const [fromId, toId] of pairs) {
+    const from = byId.get(fromId);
+    const to = byId.get(toId);
+    if (!from || !to) continue;
+    const midpoint = from.sprite.position.clone().lerp(to.sprite.position, 0.5);
+    midpoint.z += 0.28;
+    const curve = new THREE.QuadraticBezierCurve3(from.sprite.position, midpoint, to.sprite.position);
+    const geometry = new THREE.BufferGeometry().setFromPoints(curve.getPoints(34));
+    const material = new THREE.LineBasicMaterial({
+      color: 0x7ef7d4,
+      transparent: true,
+      opacity: 0.08,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+    });
+    const line = new THREE.Line(geometry, material);
+    root.add(line);
+    brainViz.signalLinks.push({ fromId, toId, line });
   }
-
-  drawMidline(ctx, width, height);
-  drawNeuralNodes(ctx, width, height, spots, values);
 }
 
-function drawBrainBaseShadow(ctx, width, height) {
-  ctx.save();
-  const shadow = ctx.createRadialGradient(width * 0.5, height * 0.56, 0, width * 0.5, height * 0.6, width * 0.42);
-  shadow.addColorStop(0, "rgba(38, 214, 179, 0.18)");
-  shadow.addColorStop(0.65, "rgba(0, 0, 0, 0.26)");
-  shadow.addColorStop(1, "rgba(0, 0, 0, 0)");
-  ctx.fillStyle = shadow;
-  ctx.beginPath();
-  ctx.ellipse(width * 0.5, height * 0.62, width * 0.34, height * 0.18, 0, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.restore();
-}
-
-function drawHemisphere(ctx, cx, cy, w, h, side) {
-  ctx.save();
-  ctx.translate(cx, cy);
-  ctx.scale(side, 1);
-  drawHemisphereShape(ctx, w, h);
-
-  const gradient = ctx.createLinearGradient(-w * 0.6, -h * 0.56, w * 0.6, h * 0.54);
-  gradient.addColorStop(0, "rgba(19, 61, 69, 0.98)");
-  gradient.addColorStop(0.34, "rgba(8, 23, 35, 0.98)");
-  gradient.addColorStop(0.72, "rgba(4, 15, 24, 0.98)");
-  gradient.addColorStop(1, "rgba(33, 101, 91, 0.86)");
+function createGlowSprite(THREE, color) {
+  const canvas = document.createElement("canvas");
+  canvas.width = 128;
+  canvas.height = 128;
+  const ctx = canvas.getContext("2d");
+  const rgb = hexToRgb(color);
+  const gradient = ctx.createRadialGradient(64, 64, 0, 64, 64, 62);
+  gradient.addColorStop(0, `rgba(${rgb.r}, ${rgb.g}, ${rgb.b}, 1)`);
+  gradient.addColorStop(0.35, `rgba(${rgb.r}, ${rgb.g}, ${rgb.b}, 0.42)`);
+  gradient.addColorStop(0.7, `rgba(${rgb.r}, ${rgb.g}, ${rgb.b}, 0.12)`);
+  gradient.addColorStop(1, `rgba(${rgb.r}, ${rgb.g}, ${rgb.b}, 0)`);
   ctx.fillStyle = gradient;
-  ctx.shadowColor = "rgba(0, 0, 0, 0.5)";
-  ctx.shadowBlur = 28;
-  ctx.shadowOffsetY = 15;
-  ctx.fill();
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
 
-  ctx.shadowColor = "transparent";
-  ctx.strokeStyle = "rgba(237, 252, 233, 0.44)";
-  ctx.lineWidth = 2;
-  ctx.stroke();
-
-  ctx.save();
-  drawHemisphereShape(ctx, w, h);
-  ctx.clip();
-  drawHemisphereDepth(ctx, w, h);
-  drawCorticalFolds(ctx, w, h);
-  ctx.restore();
-
-  ctx.restore();
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.colorSpace = THREE.SRGBColorSpace;
+  const material = new THREE.SpriteMaterial({
+    map: texture,
+    transparent: true,
+    opacity: 0.08,
+    depthWrite: false,
+    blending: THREE.AdditiveBlending,
+  });
+  const sprite = new THREE.Sprite(material);
+  sprite.renderOrder = 4;
+  return sprite;
 }
 
-function drawHemisphereShape(ctx, w, h) {
-  ctx.beginPath();
-  ctx.moveTo(-w * 0.03, -h * 0.49);
-  ctx.bezierCurveTo(-w * 0.38, -h * 0.54, -w * 0.65, -h * 0.34, -w * 0.66, -h * 0.08);
-  ctx.bezierCurveTo(-w * 0.76, h * 0.09, -w * 0.66, h * 0.32, -w * 0.44, h * 0.43);
-  ctx.bezierCurveTo(-w * 0.31, h * 0.55, -w * 0.05, h * 0.57, w * 0.12, h * 0.5);
-  ctx.bezierCurveTo(w * 0.42, h * 0.47, w * 0.6, h * 0.22, w * 0.55, -h * 0.05);
-  ctx.bezierCurveTo(w * 0.6, -h * 0.3, w * 0.35, -h * 0.49, -w * 0.03, -h * 0.49);
-  ctx.closePath();
+function createSignalRing(THREE, color, scale) {
+  const geometry = new THREE.TorusGeometry(scale * 0.56, scale * 0.018, 8, 96);
+  const material = new THREE.MeshBasicMaterial({
+    color: new THREE.Color(color),
+    transparent: true,
+    opacity: 0.08,
+    depthWrite: false,
+    blending: THREE.AdditiveBlending,
+  });
+  const ring = new THREE.Mesh(geometry, material);
+  ring.rotation.set(Math.PI / 2, 0, 0);
+  ring.renderOrder = 3;
+  return ring;
 }
 
-function drawHemisphereDepth(ctx, w, h) {
-  const highlight = ctx.createRadialGradient(-w * 0.26, -h * 0.34, 0, -w * 0.18, -h * 0.2, w * 0.78);
-  highlight.addColorStop(0, "rgba(245, 242, 234, 0.17)");
-  highlight.addColorStop(0.45, "rgba(38, 214, 179, 0.08)");
-  highlight.addColorStop(1, "rgba(0, 0, 0, 0)");
-  ctx.fillStyle = highlight;
-  ctx.fillRect(-w, -h, w * 2, h * 2);
+function attachBrainPointerEvents() {
+  if (brainViz.pointerBound) return;
+  brainViz.pointerBound = true;
 
-  const lowerShade = ctx.createLinearGradient(0, -h * 0.1, 0, h * 0.56);
-  lowerShade.addColorStop(0, "rgba(0, 0, 0, 0)");
-  lowerShade.addColorStop(1, "rgba(0, 0, 0, 0.34)");
-  ctx.fillStyle = lowerShade;
-  ctx.fillRect(-w, -h, w * 2, h * 2);
+  els.brainCanvas.addEventListener("pointerdown", (event) => {
+    brainViz.pointer.dragging = true;
+    brainViz.pointer.lastX = event.clientX;
+    brainViz.pointer.lastY = event.clientY;
+    brainViz.pointer.velocityX = 0;
+    brainViz.pointer.velocityY = 0;
+    els.brainCanvas.setPointerCapture(event.pointerId);
+    els.brainStage.classList.add("is-dragging");
+  });
+
+  els.brainCanvas.addEventListener("pointermove", (event) => {
+    if (!brainViz.pointer.dragging) return;
+    const dx = event.clientX - brainViz.pointer.lastX;
+    const dy = event.clientY - brainViz.pointer.lastY;
+    brainViz.pointer.lastX = event.clientX;
+    brainViz.pointer.lastY = event.clientY;
+    brainViz.pointer.rotationY += dx * 0.006;
+    brainViz.pointer.rotationX = clamp(brainViz.pointer.rotationX + dy * 0.004, -0.58, 0.34);
+    brainViz.pointer.velocityX = dx;
+    brainViz.pointer.velocityY = dy;
+  });
+
+  els.brainCanvas.addEventListener("pointerup", (event) => {
+    brainViz.pointer.dragging = false;
+    els.brainCanvas.releasePointerCapture(event.pointerId);
+    els.brainStage.classList.remove("is-dragging");
+  });
+
+  els.brainCanvas.addEventListener("pointercancel", () => {
+    brainViz.pointer.dragging = false;
+    els.brainStage.classList.remove("is-dragging");
+  });
 }
 
-function drawMidline(ctx, width, height) {
-  ctx.save();
-  ctx.strokeStyle = "rgba(38, 214, 179, 0.22)";
-  ctx.lineWidth = 7;
-  ctx.beginPath();
-  ctx.moveTo(width * 0.5, height * 0.13);
-  ctx.bezierCurveTo(width * 0.47, height * 0.31, width * 0.54, height * 0.55, width * 0.49, height * 0.84);
-  ctx.stroke();
-  ctx.strokeStyle = "rgba(245, 242, 234, 0.38)";
-  ctx.lineWidth = 1.4;
-  ctx.setLineDash([6, 7]);
-  ctx.beginPath();
-  ctx.moveTo(width * 0.5, height * 0.11);
-  ctx.bezierCurveTo(width * 0.47, height * 0.3, width * 0.54, height * 0.56, width * 0.49, height * 0.87);
-  ctx.stroke();
-  ctx.setLineDash([]);
-  ctx.restore();
-}
-
-function drawCorticalFolds(ctx, w, h) {
-  const curves = [
-    [-0.5, -0.26, -0.24, -0.42, 0.08, -0.28, -0.1, -0.05],
-    [-0.57, 0.02, -0.27, -0.1, 0.13, 0.06, -0.18, 0.24],
-    [-0.36, 0.38, -0.08, 0.16, 0.2, 0.3, 0.04, 0.48],
-    [-0.08, -0.38, 0.08, -0.16, -0.02, 0.06, 0.15, 0.31],
-    [-0.47, -0.04, -0.2, 0.04, -0.32, 0.2, -0.52, 0.18],
-    [-0.08, 0.16, 0.2, 0.02, 0.3, 0.22, 0.16, 0.42],
-  ];
-  ctx.save();
-  ctx.lineCap = "round";
-  for (const curve of curves) {
-    ctx.strokeStyle = "rgba(38, 214, 179, 0.13)";
-    ctx.lineWidth = 5;
-    ctx.beginPath();
-    ctx.moveTo(curve[0] * w, curve[1] * h);
-    ctx.bezierCurveTo(
-      curve[2] * w,
-      curve[3] * h,
-      curve[4] * w,
-      curve[5] * h,
-      curve[6] * w,
-      curve[7] * h,
-    );
-    ctx.stroke();
-    ctx.strokeStyle = "rgba(245, 242, 234, 0.34)";
-    ctx.lineWidth = 1.2;
-    ctx.stroke();
+function syncBrainSceneSize() {
+  if (!brainViz.renderer || !brainViz.camera) return;
+  const rect = els.brainCanvas.getBoundingClientRect();
+  const width = Math.max(1, Math.floor(rect.width));
+  const height = Math.max(1, Math.floor(rect.height));
+  const drawingWidth = Math.floor(width * brainViz.renderer.getPixelRatio());
+  const drawingHeight = Math.floor(height * brainViz.renderer.getPixelRatio());
+  if (els.brainCanvas.width !== drawingWidth || els.brainCanvas.height !== drawingHeight) {
+    brainViz.renderer.setSize(width, height, false);
+    brainViz.camera.aspect = width / height;
+    brainViz.camera.updateProjectionMatrix();
   }
-  ctx.restore();
 }
 
-function drawActivationNetwork(ctx, width, height, spots, values) {
-  ctx.save();
-  ctx.globalCompositeOperation = "screen";
-  ctx.lineCap = "round";
-  for (let index = 0; index < spots.length - 1; index += 1) {
-    const [idA, xA, yA] = spots[index];
-    const [idB, xB, yB] = spots[index + 1];
-    const signal = clamp(((values[idA] || 0) + (values[idB] || 0)) / 2);
-    if (signal < 0.03) continue;
-    ctx.strokeStyle = `rgba(38, 214, 179, ${0.08 + signal * 0.28})`;
-    ctx.lineWidth = 1 + signal * 3;
-    ctx.beginPath();
-    ctx.moveTo(xA * width, yA * height);
-    ctx.lineTo(xB * width, yB * height);
-    ctx.stroke();
+function renderBrainScene(now) {
+  requestAnimationFrame(renderBrainScene);
+  if (!brainViz.renderer || !brainViz.scene || !brainViz.camera || !brainViz.root) return;
+
+  syncBrainSceneSize();
+  const delta = Math.min(0.05, Math.max(0.001, (now - brainViz.lastFrameAt) / 1000));
+  const elapsed = (now - brainViz.startTime) / 1000;
+  brainViz.lastFrameAt = now;
+
+  for (const channel of channels) {
+    const id = channel.id;
+    brainViz.current[id] = mix(brainViz.current[id] || 0, brainViz.target[id] || 0, Math.min(1, delta * 5.6));
   }
-  ctx.restore();
-}
 
-function drawBlob(ctx, x, y, radius, color, value) {
-  ctx.save();
-  ctx.globalCompositeOperation = "screen";
-  const gradient = ctx.createRadialGradient(x, y, 0, x, y, radius);
-  gradient.addColorStop(0, colorWithAlpha(color, 0.95 * value));
-  gradient.addColorStop(0.36, colorWithAlpha(color, 0.5 * value));
-  gradient.addColorStop(1, colorWithAlpha(color, 0));
-  ctx.fillStyle = gradient;
-  ctx.beginPath();
-  ctx.arc(x, y, radius, 0, Math.PI * 2);
-  ctx.fill();
-
-  if (value > 0.2) {
-    const pixel = Math.max(2, Math.round(radius / 12));
-    ctx.globalAlpha = Math.min(0.75, value);
-    ctx.fillStyle = colorWithAlpha(color, 0.55);
-    for (let i = -2; i <= 2; i += 1) {
-      for (let j = -2; j <= 2; j += 1) {
-        if (Math.abs(i) + Math.abs(j) > 3) continue;
-        ctx.fillRect(x + i * pixel * 2, y + j * pixel * 2, pixel, pixel);
-      }
-    }
+  const activeChannels = channels.filter((channel) => channel.id !== "default");
+  const intensity = average(activeChannels.map((channel) => brainViz.current[channel.id] || 0));
+  if (!brainViz.pointer.dragging) {
+    brainViz.pointer.rotationY += delta * (0.16 + intensity * 0.12) + brainViz.pointer.velocityX * delta * 0.003;
+    brainViz.pointer.velocityX *= 0.88;
+    brainViz.pointer.velocityY *= 0.88;
   }
-  ctx.restore();
-}
 
-function drawNeuralNodes(ctx, width, height, spots, values) {
-  ctx.save();
-  for (const [id, x, y] of spots) {
-    const value = clamp(values[id]);
-    if (value < 0.06) continue;
-    const channel = channels.find((item) => item.id === id);
-    ctx.fillStyle = colorWithAlpha(channel.color, 0.7);
-    ctx.strokeStyle = "rgba(245, 242, 234, 0.62)";
-    ctx.lineWidth = 1;
-    ctx.beginPath();
-    ctx.arc(x * width, y * height, 2 + value * 4, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.stroke();
+  brainViz.root.rotation.x = brainViz.pointer.rotationX + Math.sin(elapsed * 0.7) * 0.025;
+  brainViz.root.rotation.y = brainViz.pointer.rotationY;
+  brainViz.root.rotation.z = Math.sin(elapsed * 0.45) * 0.025;
+  brainViz.root.position.y = Math.sin(elapsed * 1.1) * 0.035;
+
+  if (brainViz.model) {
+    const pulse = 1 + intensity * 0.024 + Math.sin(elapsed * 1.6) * 0.006;
+    brainViz.model.scale.setScalar(brainViz.modelBaseScale * pulse);
   }
-  ctx.restore();
+
+  for (const hotspot of brainViz.hotspots) {
+    const value = brainViz.current[hotspot.id] || 0;
+    const wave = 0.5 + 0.5 * Math.sin(elapsed * (1.4 + value) + hotspot.position[0] * 2.4);
+    const glowScale = hotspot.scale * (0.54 + value * 1.55 + wave * value * 0.12);
+    hotspot.sprite.scale.setScalar(glowScale);
+    hotspot.sprite.material.opacity = clamp(0.05 + value * 0.74 + wave * value * 0.08, 0.04, 0.9);
+    hotspot.ring.scale.setScalar(0.78 + value * 0.78 + wave * 0.05);
+    hotspot.ring.material.opacity = clamp(0.04 + value * 0.34, 0.03, 0.46);
+    hotspot.ring.rotation.z += delta * (0.4 + value * 0.9);
+  }
+
+  for (const link of brainViz.signalLinks) {
+    const signal = ((brainViz.current[link.fromId] || 0) + (brainViz.current[link.toId] || 0)) / 2;
+    link.line.material.opacity = clamp(0.04 + signal * 0.34, 0.04, 0.4);
+  }
+
+  if (brainViz.particles) {
+    brainViz.particles.rotation.y -= delta * (0.025 + intensity * 0.03);
+    brainViz.particles.material.opacity = clamp(0.14 + intensity * 0.26, 0.14, 0.42);
+  }
+
+  brainViz.renderer.render(brainViz.scene, brainViz.camera);
 }
 
-function colorWithAlpha(hex, alpha) {
+function hexToRgb(hex) {
   const value = hex.replace("#", "");
-  const r = parseInt(value.slice(0, 2), 16);
-  const g = parseInt(value.slice(2, 4), 16);
-  const b = parseInt(value.slice(4, 6), 16);
-  return `rgba(${r}, ${g}, ${b}, ${clamp(alpha)})`;
+  return {
+    r: parseInt(value.slice(0, 2), 16),
+    g: parseInt(value.slice(2, 4), 16),
+    b: parseInt(value.slice(4, 6), 16),
+  };
 }
 
 function drawGraph() {
@@ -1283,11 +1457,10 @@ function draw() {
   if (state.needsRedraw || now - state.lastCanvasDrawAt > redrawEvery) {
     state.lastCanvasDrawAt = now;
     state.needsRedraw = false;
-    resizeCanvasToDisplaySize(els.brainCanvas);
     resizeCanvasToDisplaySize(els.graphCanvas);
     updateCurrentValuesFromSeries();
     updateMeters(state.currentValues);
-    drawBrain(state.currentValues);
+    updateBrainScene(state.currentValues);
     drawGraph();
     updateStatus();
     updateSecondRail();
@@ -1405,4 +1578,5 @@ window.addEventListener("resize", () => {
 initMeters();
 initGraphLegend();
 resetAnalysis(0);
+initBrainScene();
 draw();
