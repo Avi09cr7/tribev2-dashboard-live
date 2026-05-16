@@ -360,13 +360,13 @@ video[src=""] {
 
 .brain-stage {
   background:
-    radial-gradient(circle at 50% 43%, rgba(38, 214, 179, 0.2), transparent 39%),
-    radial-gradient(circle at 26% 18%, rgba(255, 119, 89, 0.13), transparent 30%),
-    linear-gradient(rgba(237, 252, 233, 0.045) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(237, 252, 233, 0.045) 1px, transparent 1px),
-    #03070d;
+    radial-gradient(circle at 50% 50%, rgba(10, 30, 60, 0.6), transparent 50%),
+    radial-gradient(circle at 28% 20%, rgba(0, 50, 80, 0.18), transparent 35%),
+    linear-gradient(rgba(100, 160, 220, 0.04) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(100, 160, 220, 0.04) 1px, transparent 1px),
+    #020508;
   background-size: auto, auto, 18px 18px, 18px 18px, auto;
-  border-color: rgba(237, 252, 233, 0.18);
+  border-color: rgba(80, 140, 200, 0.18);
   aspect-ratio: 1.95 / 1;
   min-height: 220px;
   isolation: isolate;

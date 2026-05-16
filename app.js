@@ -1008,11 +1008,13 @@ async function initBrainScene() {
     const gltf = await loadBrainModel(loader);
     const model = gltf.scene || gltf.scenes?.[0];
     if (!model) throw new Error("The downloaded brain model did not contain a scene.");
+    
+    createBrainSignals(THREE, root);
+
     prepareBrainModel(THREE, model);
     root.add(model);
     brainViz.model = model;
 
-    createBrainSignals(THREE, root);
     attachBrainPointerEvents();
     syncBrainSceneSize();
     brainViz.ready = true;
@@ -1095,22 +1097,118 @@ function prepareBrainModel(THREE, model) {
   model.rotation.set(0.08, -0.28, 0.03);
   brainViz.modelBaseScale = baseScale;
 
-  const warmTissue = new THREE.Color(0xd8a39b);
+  const coolTissue = new THREE.Color(0x3a4a5c);
   model.traverse((node) => {
     if (!node.isMesh) return;
     const original = node.material || {};
-    const originalColor = original.color?.clone?.() || warmTissue.clone();
+    const originalColor = original.color?.clone?.() || coolTissue.clone();
     const material = new THREE.MeshStandardMaterial({
-      color: originalColor.lerp(warmTissue, 0.62),
+      color: originalColor.lerp(coolTissue, 0.72),
       map: original.map || null,
       normalMap: original.normalMap || null,
-      roughness: 0.58,
-      metalness: 0.03,
+      roughness: 0.62,
+      metalness: 0.06,
       transparent: true,
       opacity: 0.96,
-      emissive: new THREE.Color(0x2a1416),
-      emissiveIntensity: 0.2,
+      emissive: new THREE.Color(0x0a1018),
+      emissiveIntensity: 0.12,
     });
+
+    material.onBeforeCompile = (shader) => {
+      if (!brainViz.shaderUniforms) return;
+      shader.uniforms.hotspots   = brainViz.shaderUniforms.hotspots;
+      shader.uniforms.uTime      = brainViz.shaderUniforms.uTime;
+      shader.uniforms.uThreshold = brainViz.shaderUniforms.uThreshold;
+      shader.uniforms.uScanPhase = brainViz.shaderUniforms.uScanPhase;
+
+      /* ---- vertex shader ---- */
+      shader.vertexShader = shader.vertexShader.replace(
+        '#include <common>',
+        `#include <common>
+         varying vec3 vWorldPos;
+         varying vec3 vWorldNormal;
+        `
+      ).replace(
+        '#include <worldpos_vertex>',
+        `#include <worldpos_vertex>
+         vWorldPos    = (modelMatrix * vec4(transformed, 1.0)).xyz;
+         vWorldNormal = normalize(mat3(modelMatrix) * objectNormal);
+        `
+      );
+
+      /* ---- fragment shader ---- */
+      shader.fragmentShader = shader.fragmentShader.replace(
+        '#include <common>',
+        `#include <common>
+         varying vec3 vWorldPos;
+         varying vec3 vWorldNormal;
+
+         struct Hotspot {
+           vec3  position;
+           vec3  color;
+           float intensity;
+           float radius;
+         };
+         uniform Hotspot hotspots[8];
+         uniform float   uTime;
+         uniform float   uThreshold;
+         uniform float   uScanPhase;
+
+         /* medical fMRI heatmap: deep-blue → cyan → green → yellow → red */
+         vec3 fmriHeatmap(float t) {
+           t = clamp(t, 0.0, 1.0);
+           if (t < 0.2)  return mix(vec3(0.0, 0.0, 0.28),  vec3(0.0, 0.35, 0.85), t / 0.2);
+           if (t < 0.4)  return mix(vec3(0.0, 0.35, 0.85), vec3(0.0, 0.82, 0.78), (t - 0.2) / 0.2);
+           if (t < 0.6)  return mix(vec3(0.0, 0.82, 0.78), vec3(0.28, 0.92, 0.2), (t - 0.4) / 0.2);
+           if (t < 0.8)  return mix(vec3(0.28, 0.92, 0.2), vec3(1.0, 0.86, 0.0),  (t - 0.6) / 0.2);
+           return              mix(vec3(1.0, 0.86, 0.0),  vec3(1.0, 0.18, 0.06), (t - 0.8) / 0.2);
+         }
+        `
+      ).replace(
+        '#include <emissivemap_fragment>',
+        `#include <emissivemap_fragment>
+
+         /* --- accumulate heat from all hotspots --- */
+         float totalHeat = 0.0;
+         for (int i = 0; i < 8; i++) {
+           float dist      = distance(vWorldPos, hotspots[i].position);
+           float influence  = 1.0 - clamp(dist / hotspots[i].radius, 0.0, 1.0);
+           influence         = influence * influence * (3.0 - 2.0 * influence); /* smootherstep */
+           totalHeat        += hotspots[i].intensity * influence;
+         }
+         totalHeat = clamp(totalHeat, 0.0, 1.0);
+
+         /* --- threshold gate: soft step at 0.3 --- */
+         float activationMask = smoothstep(uThreshold - 0.06, uThreshold + 0.12, totalHeat);
+
+         /* --- heatmap color --- */
+         vec3 heatColor = fmriHeatmap(totalHeat);
+
+         /* --- heartbeat pulse (faster for hotter regions) --- */
+         float pulse = 0.82 + 0.18 * sin(uTime * 2.8 + totalHeat * 6.2832);
+
+         /* --- MRI scan sweep (horizontal plane oscillates through brain) --- */
+         float scanY    = sin(uScanPhase) * 1.5;
+         float scanDist = abs(vWorldPos.y - scanY);
+         float scanLine = smoothstep(0.08, 0.0, scanDist) * 0.45;
+
+         /* --- Fresnel rim glow --- */
+         vec3  viewDir = normalize(cameraPosition - vWorldPos);
+         float fresnel = pow(1.0 - abs(dot(normalize(vWorldNormal), viewDir)), 3.0);
+
+         /* --- compose final glow --- */
+         vec3 regionGlow = heatColor * activationMask * pulse * 3.2;
+         vec3 rimGlow    = heatColor * fresnel * activationMask * 1.6;
+         vec3 scanGlow   = vec3(0.3, 0.82, 1.0) * scanLine;
+
+         totalEmissiveRadiance += regionGlow + rimGlow + scanGlow;
+
+         /* --- tint the diffuse surface itself toward the heatmap color --- */
+         diffuseColor.rgb = mix(diffuseColor.rgb, heatColor * 0.55 + diffuseColor.rgb * 0.45, activationMask * 0.55);
+        `
+      );
+    };
+
     node.material = material;
     node.castShadow = false;
     node.receiveShadow = false;
@@ -1130,7 +1228,25 @@ function createBrainSignals(THREE, root) {
   ];
   const byId = new Map();
 
-  for (const item of positions) {
+  brainViz.shaderUniforms = {
+    hotspots: {
+      value: positions.map((item) => {
+        const channel = channels.find((entry) => entry.id === item.id);
+        return {
+          position: new THREE.Vector3(),
+          color: new THREE.Color(channel.color),
+          intensity: 0.0,
+          radius: item.scale * 3.8
+        };
+      })
+    },
+    uTime: { value: 0.0 },
+    uThreshold: { value: 0.3 },
+    uScanPhase: { value: 0.0 },
+  };
+
+  for (let i = 0; i < positions.length; i++) {
+    const item = positions[i];
     const channel = channels.find((entry) => entry.id === item.id);
     const sprite = createGlowSprite(THREE, channel.color);
     sprite.position.set(...item.position);
@@ -1142,7 +1258,7 @@ function createBrainSignals(THREE, root) {
     ring.position.copy(sprite.position);
     root.add(ring);
 
-    const hotspot = { ...item, channel, sprite, ring };
+    const hotspot = { ...item, channel, sprite, ring, uniform: brainViz.shaderUniforms.hotspots.value[i] };
     brainViz.hotspots.push(hotspot);
     if (!byId.has(item.id)) byId.set(item.id, hotspot);
   }
@@ -1313,6 +1429,17 @@ function renderBrainScene(now) {
     hotspot.ring.scale.setScalar(0.78 + value * 0.78 + wave * 0.05);
     hotspot.ring.material.opacity = clamp(0.04 + value * 0.34, 0.03, 0.46);
     hotspot.ring.rotation.z += delta * (0.4 + value * 0.9);
+
+    if (hotspot.uniform) {
+      hotspot.sprite.getWorldPosition(hotspot.uniform.position);
+      hotspot.uniform.intensity = value;
+    }
+  }
+
+  /* feed global animation uniforms to the GPU */
+  if (brainViz.shaderUniforms) {
+    brainViz.shaderUniforms.uTime.value      = elapsed;
+    brainViz.shaderUniforms.uScanPhase.value  = elapsed * 0.6;
   }
 
   for (const link of brainViz.signalLinks) {
